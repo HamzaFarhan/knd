@@ -8,6 +8,62 @@ from pydantic_ai.result import RunResult
 from rich.prompt import Prompt
 
 
+def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponsePart) -> int:
+    if isinstance(part, (_messages.UserPromptPart, _messages.SystemPromptPart, _messages.TextPart)):
+        content = part.content
+    elif isinstance(part, _messages.ToolReturnPart):
+        content = part.model_response_str()
+    elif isinstance(part, _messages.RetryPromptPart):
+        content = part.model_response()
+    elif isinstance(part, _messages.ToolCallPart):
+        content = part.args_as_json_str()
+    return int(len(content.split()) / 0.75)
+
+
+def count_message_tokens(message: _messages.ModelMessage) -> int:
+    return sum(count_part_tokens(part) for part in message.parts)
+
+
+def count_tokens(messages: list[_messages.ModelMessage] | _messages.ModelMessage) -> int:
+    if isinstance(messages, _messages.ModelMessage):
+        messages = [messages]
+    return sum(count_message_tokens(message) for message in messages)
+
+
+def trim_messages(
+    messages: list[_messages.ModelMessage], n: int | None = None, remove_system_prompt: bool = True
+) -> list[_messages.ModelMessage]:
+    n = n or len(messages)
+    result = messages[-n:]
+    while result:
+        if (
+            isinstance(result[0], _messages.ModelRequest)
+            and result[0].parts
+            and isinstance(result[0].parts[0], (_messages.UserPromptPart, _messages.SystemPromptPart))
+        ):
+            break
+        n += 1
+        if n > len(messages):
+            return []
+        result = messages[-n:]
+    if remove_system_prompt:
+        if (
+            result
+            and isinstance(result[0], _messages.ModelRequest)
+            and any(isinstance(p, _messages.SystemPromptPart) for p in result[0].parts)
+        ):
+            new_parts: list[_messages.ModelRequestPart] = [
+                p for p in result[0].parts if not isinstance(p, _messages.SystemPromptPart)
+            ]
+            if new_parts:
+                result[0] = _messages.ModelRequest(parts=new_parts, kind=result[0].kind)
+            else:
+                return trim_messages(messages=messages, n=n + 1, remove_system_prompt=remove_system_prompt)
+    elif n < len(messages) and any(isinstance(p, _messages.SystemPromptPart) for p in messages[0].parts):
+        return [messages[0]] + result
+    return result
+
+
 async def create_run_context(
     agent: Agent,
     user_prompt: str,
@@ -21,16 +77,15 @@ async def create_run_context(
     )
 
 
-def replace_system_parts(new_parts: list[_messages.ModelRequestPart], messages: list[_messages.ModelMessage]):
+def replace_system_parts(
+    messages: list[_messages.ModelMessage], new_parts: list[_messages.ModelRequestPart]
+) -> list[_messages.ModelMessage]:
     messages = deepcopy(messages)
-    for msg in messages:
-        if isinstance(msg, _messages.ModelRequest) and any(
-            isinstance(part, _messages.SystemPromptPart) for part in msg.parts
-        ):
-            msg.parts = new_parts + [
-                part for part in msg.parts if not isinstance(part, _messages.SystemPromptPart)
-            ]
-            return messages
+    if not messages:
+        return [_messages.ModelRequest(parts=new_parts)]
+    msg = messages[0]
+    if isinstance(msg, _messages.ModelRequest):
+        msg.parts = new_parts + [part for part in msg.parts if not isinstance(part, _messages.SystemPromptPart)]
     return messages
 
 
