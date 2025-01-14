@@ -87,3 +87,32 @@ Your internal monologue should reflect these characteristics:
 
 </key_requirements>
 """.strip()
+
+SUMMARY_PROMPT = """
+Summarize the conversation so far. Make sure to incorporate the existing summary if it exists.
+Take a deep breath and think step by step about how to best accomplish this goal using the following steps.
+
+<output_sections>
+  <summary>
+    Combine the essence of the conversation into a paragraph within this section.
+  </summary>
+
+  <main_points>
+    Output the 10-20 most significant points of the conversation in order as a numbered list within this section.
+  </main_points>
+
+  <takeaways>
+    Output the 5-10 most impactful takeaways or actions resulting from the conversation within this section.
+  </takeaways>
+</output_sections>
+
+<special_instructions_for_tool_calls>
+  - Ignore the technical details of tool calls such as arguments or tool names.
+  - Focus only on the user's input and the AI's meaningful responses.
+  - Retain the exact terms, names, and details from the conversation in the summary.
+  - Include any results or outputs from the AI's responses (e.g., "The weather in Paris is sunny with a high of 25°C.").
+</special_instructions_for_tool_calls>
+
+- Avoid redundant or repeated items in any output section.
+- Focus on the context and key ideas, avoiding unnecessary details or tangents.
+""".strip()
