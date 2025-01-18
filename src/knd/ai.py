@@ -4,7 +4,8 @@ from typing import Any, Callable, Literal
 from pydantic_ai import Agent, RunContext, models
 from pydantic_ai import messages as _messages
 from pydantic_ai import usage as _usage
-from pydantic_ai.result import RunResult
+from pydantic_ai.result import ResultData, RunResult
+from pydantic_ai.tools import AgentDeps
 from rich.prompt import Prompt
 
 
@@ -48,6 +49,8 @@ def trim_messages(
     remove_system_prompt: bool = False,
     strategy: Literal["last", "first"] = "last",
 ) -> list[_messages.ModelMessage]:
+    if not messages:
+        return []
     messages = deepcopy(messages)
     if remove_system_prompt and isinstance(messages[0], _messages.ModelRequest):
         new_message = replace_system_parts(messages[0])
@@ -136,8 +139,11 @@ async def get_messages_for_agent_tool(
 
 
 async def run_until_completion(
-    user_prompt: str, agent: Agent, message_history: list[_messages.ModelMessage] | None = None, deps: Any = None
-) -> RunResult:
+    user_prompt: str,
+    agent: Agent[AgentDeps, ResultData],
+    message_history: list[_messages.ModelMessage] | None = None,
+    deps: AgentDeps = None,
+) -> RunResult[ResultData]:
     while True:
         res = await agent.run(user_prompt=user_prompt, deps=deps, message_history=message_history)
         if isinstance(res.data, str):

@@ -8,3 +8,4 @@ wheels/
 memories/
 # Virtual environments
 .venv
+*.json

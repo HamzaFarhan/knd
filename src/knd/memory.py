@@ -4,14 +4,44 @@ from pathlib import Path
 from typing import Self
 from uuid import UUID, uuid4
 
-from pydantic import UUID4, BaseModel, Field, field_validator
+from loguru import logger
+from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 from pydantic.json_schema import SkipJsonSchema
+from pydantic_ai import Agent
 from pydantic_ai import messages as _messages
 
 from knd.ai import trim_messages
 
 AGENT_MEMORIES_DIR = "agent_memories"
 MESSAGE_COUNT_LIMIT = 10
+
+SUMMARY_PROMPT = """
+Summarize the conversation so far. Make sure to incorporate the existing summary if it exists.
+Take a deep breath and think step by step about how to best accomplish this goal using the following steps.
+I want the summary to look like this:
+
+<summary>
+  Combine the essence of the conversation into a paragraph within this section.
+</summary>
+
+<main_points>
+  Output the 10-20 most significant points of the conversation in order as a numbered list within this section.
+</main_points>
+
+<takeaways>
+  Output the 5-10 most impactful takeaways or actions resulting from the conversation within this section.
+</takeaways>
+
+<special_instructions_for_tool_calls>
+  - Ignore the technical details of tool calls such as arguments or tool names.
+  - Focus only on the user's input and the AI's meaningful responses.
+  - Retain the exact terms, names, and details from the conversation in the summary.
+  - Include any results or outputs from the AI's responses (e.g., "The weather in Paris is sunny with a high of 25°C.").
+</special_instructions_for_tool_calls>
+
+- Avoid redundant or repeated items in any output section.
+- Focus on the context and key ideas, avoiding unnecessary details or tangents.
+""".strip()
 
 
 class Profile(BaseModel):
@@ -24,6 +54,10 @@ class Profile(BaseModel):
         default_factory=list,
         description="A list of the user's preferred conversation styles, topics they want to avoid, etc.",
     )
+
+    @classmethod
+    def user_prompt(cls) -> str:
+        return "Create an updated detailed user profile from the current information you have. Make sure to incorporate the existing profile if it exists in <user_specific_experience>. Prefer to add new stuff to the profile rather than overwrite existing stuff. Unless of course it makes sense to overwrite existing stuff. For example, if the user says they are 25 years old, and the profile says they are 20 years old, then it makes sense to overwrite the profile with the new information."
 
 
 class Memory(BaseModel):
@@ -39,6 +73,28 @@ class Memory(BaseModel):
     superseded_ids: list[str] = Field(
         default_factory=list, description="IDs of memories this explicitly supersedes"
     )
+
+    @field_serializer("id")
+    def serialize_id(self, id: UUID4) -> str:
+        return str(id)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, v: str | UUID4) -> UUID4:
+        if isinstance(v, str):
+            return UUID(v)
+        return v
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, v: datetime) -> str:
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+
+    @field_validator("created_at")
+    @classmethod
+    def validate_created_at(cls, v: str | datetime) -> datetime:
+        if isinstance(v, str):
+            return datetime.strptime(v, "%Y-%m-%d %H:%M:%S")
+        return v
 
     @classmethod
     def user_prompt(cls) -> str:
@@ -74,7 +130,7 @@ For each memory identified:
 - Consider how it might affect future interactions
 
 When creating memories that update existing information:
-- If you have access to previous memories, check if any new information contradicts or updates them
+- If you have access to previous memories in <user_specific_experience>, check if any new information contradicts or updates them
 - Include the IDs of any superseded memories in the `superseded_ids` field
 - Example: If a user previously said they lived in New York (memory ID: abc-123) but now mentions moving to Boston, 
   create a new memory with superseded_ids=["abc-123"]
@@ -91,107 +147,165 @@ class Memories(BaseModel):
     @field_validator("memories")
     @classmethod
     def validate_memories(cls, memories: list[Memory]) -> list[Memory]:
+        # Get superseded IDs
         superseded_ids = set()
         for memory in memories:
             superseded_ids.update(memory.superseded_ids)
-        return sorted(
-            [
-                Memory(**m.model_dump(exclude={"superseded_ids"}))
-                for m in memories
-                if str(m.id) not in superseded_ids
-            ],
-            key=lambda x: x.created_at,
-        )
+
+        # Create dict to ensure uniqueness by ID
+        memory_dict = {}
+        for memory in memories:
+            if str(memory.id) not in superseded_ids:
+                memory_dict[str(memory.id)] = Memory(**memory.model_dump(exclude={"superseded_ids"}))
+
+        # Return sorted list of unique memories
+        return sorted(memory_dict.values(), key=lambda x: x.created_at)
 
 
-class TaskSpecificExperience(BaseModel):
-    chain_of_thought: str
-    initial_situation: str = Field(description="Describe the starting point of the task")
-    key_decisions: list[str] = Field(description="List major decision points and reasoning")
-    outcomes: list[str] = Field(description="Describe results")
-    user_feedback: list[str] = Field(description="User feedback, if any, during the task", default_factory=list)
-    lessons_learned: list[str] = Field(description="Extract key learnings")
-    success_patterns: list[str] = Field(default_factory=list)
-    failure_patterns: list[str] = Field(default_factory=list)
-    tool_usage_patterns: list[str] = Field(default_factory=list)
-    future_recommendations: list[str] = Field(description="Suggest improvements", default_factory=list)
+class AgentExperience(BaseModel):
+    procedural_knowledge: str = Field(
+        description="Accumulated understanding of how to approach tasks in the agent's domain"
+    )
+    common_scenarios: list[str] = Field(
+        description="Frequently encountered situations and their typical contexts", default_factory=list
+    )
+    effective_strategies: list[str] = Field(
+        description="Proven approaches and methodologies that have worked well", default_factory=list
+    )
+    known_pitfalls: list[str] = Field(
+        description="Common challenges, edge cases, and how to handle them", default_factory=list
+    )
+    tool_patterns: list[str] = Field(
+        description="Effective ways to use different tools, organized by tool name", default_factory=list
+    )
+    heuristics: list[str] = Field(
+        description="Rules of thumb and decision-making guidelines that emerge from experience",
+        default_factory=list,
+    )
+    user_feedback: list[str] = Field(
+        description="Collection of user feedback when the user was not satisfied with the agent's response. This is to help improve the agent's technical skills and behavior. So basic responses from the user are not useful here.",
+        default_factory=list,
+    )
+    improvement_areas: list[str] = Field(
+        description="Identified areas for optimization or enhancement. Looking at the user_feedback can also help identify areas for improvement.",
+        default_factory=list,
+    )
 
     @classmethod
     def user_prompt(cls) -> str:
         return """
-Self-reflect on the task execution process, focusing on generalizable patterns and procedures:
-1. What were the technical/procedural challenges encountered?
-2. Which solution approaches or methodologies proved effective?
-3. Which technical approaches or patterns failed?
-4. What novel technical situations or edge cases were discovered?
-5. What reusable patterns or anti-patterns emerged?
+Review this interaction and update the agent's accumulated experience, focusing on:
 
-Extract task-specific experience while:
-- Focusing on procedural knowledge and technical patterns
-- Avoiding user-specific details or personal information
-- Emphasizing reusable solutions and approaches
-- Documenting edge cases and their handling
-- Identifying technical constraints and limitations
+1. Knowledge Evolution:
+   - How does this interaction refine our understanding of the domain?
+   - What new patterns or anti-patterns emerged?
+   - Which existing strategies were reinforced or challenged?
 
-Consider and incorporate relevant experiences from previous similar tasks:
-- Compare solution approaches across different instances
-- Document which technical patterns consistently succeed or fail
-- Note environmental or contextual factors that influence success
-- Identify common pitfalls and their solutions
+2. Pattern Recognition:
+   - Does this case fit known scenarios or represent a new category?
+   - What tool usage patterns proved effective or ineffective?
+   - What decision points were critical to success/failure?
 
-The goal is to build a knowledge base of procedural patterns and technical solutions that can be applied across different users and situations.
+3. Heuristic Development:
+   - What new rules of thumb emerged from this experience?
+   - How should existing heuristics be modified based on this case?
+   - What contextual factors influenced success?
+
+Integrate this experience with existing knowledge in <agent_experience>:
+- Reinforce successful patterns that repeat
+- Refine or qualify existing heuristics based on new evidence
+- Add new scenarios or edge cases to known patterns
+- Update tool usage patterns with new insights
+- Identify emerging trends in improvement areas
+
+Focus on building a robust, evolving knowledge base that improves the agent's effectiveness over time.
+Remember that this is cumulative experience - don't overwrite existing knowledge, but rather enhance and refine it.
 """.strip()
 
 
 class UserSpecificExperience(BaseModel):
+    user_id: UUID = Field(default_factory=uuid4)
     profile: Profile | None
     memories: list[Memory] = Field(default_factory=list)
     summary: str = ""
-    message_history: list[_messages.ModelMessage] = Field(default_factory=list)
+    message_history: list[_messages.ModelMessage] | None = None
+
+    @field_serializer("user_id")
+    def serialize_user_id(self, v: UUID) -> str:
+        return str(v)
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id(cls, v: str | UUID) -> UUID:
+        if isinstance(v, str):
+            return UUID(v)
+        return v
 
     @classmethod
-    def load(cls, user_id: UUID, agent_dir: Path, message_count_limit: int = MESSAGE_COUNT_LIMIT) -> Self:
+    def load_memories(cls, user_dir: Path, new_memories: list[Memory] | None = None) -> list[Memory]:
+        user_memories_path = user_dir / "memories.json"
+        memories = {"memories": []}
+        if user_memories_path.exists():
+            memories["memories"] = [Memory.model_validate(m) for m in json.loads(user_memories_path.read_text())]
+        memories["memories"].extend(new_memories or [])
+        return Memories.model_validate(memories).memories
+
+    @classmethod
+    def load_message_history(
+        cls, user_dir: Path, new_messages: list[_messages.ModelMessage] | None = None
+    ) -> list[_messages.ModelMessage]:
+        message_history_path = user_dir / "message_history.json"
+        message_history = []
+        if message_history_path.exists():
+            message_history = _messages.ModelMessagesTypeAdapter.validate_json(message_history_path.read_bytes())
+        return message_history + (new_messages or [])
+
+    @classmethod
+    def load(
+        cls,
+        user_id: UUID,
+        agent_dir: Path,
+        new_memories: list[Memory] | None = None,
+        new_messages: list[_messages.ModelMessage] | None = None,
+        message_count_limit: int = MESSAGE_COUNT_LIMIT,
+    ) -> Self | None:
         user_dir = agent_dir / f"{user_id}"
         user_profile_path = user_dir / "profile.json"
-        user_memories_path = user_dir / "memories.json"
         user_summary_path = user_dir / "summary.txt"
-        user_message_history_path = user_dir / "message_history.json"
         if user_profile_path.exists():
             profile = Profile.model_validate_json(user_profile_path.read_text())
         else:
             profile = None
-        if user_memories_path.exists():
-            loaded_memories = {
-                "memories": [Memory.model_validate_json(m) for m in json.loads(user_memories_path.read_text())]
-            }
-            memories = Memories.model_validate(loaded_memories).memories
-        else:
-            memories = []
+        memories = cls.load_memories(user_dir=user_dir, new_memories=new_memories)
         if user_summary_path.exists():
             summary = user_summary_path.read_text()
         else:
             summary = ""
-        if user_message_history_path.exists():
-            message_history = _messages.ModelMessagesTypeAdapter.validate_json(
-                user_message_history_path.read_bytes()
-            )
-            message_history = trim_messages(messages=message_history, count_limit=message_count_limit)
-        else:
-            message_history = []
+        message_history = cls.load_message_history(user_dir=user_dir, new_messages=new_messages)
+        message_history = trim_messages(messages=message_history, count_limit=message_count_limit)
+        if not profile and not memories and not summary and not message_history:
+            return None
         return cls(profile=profile, memories=memories, summary=summary, message_history=message_history)
 
-    def dump(self, user_id: UUID, agent_dir: Path) -> None:
-        user_dir = agent_dir / f"{user_id}"
+    def dump(self, agent_dir: Path, user_id: UUID | None = None) -> None:
+        user_dir = agent_dir / f"{user_id or self.user_id}"
         user_dir.mkdir(parents=True, exist_ok=True)
         if self.profile is not None:
-            (user_dir / "profile.json").write_text(self.profile.model_dump_json())
+            (user_dir / "profile.json").write_text(self.profile.model_dump_json(indent=2))
         if self.memories:
-            (user_dir / "memories.json").write_text(json.dumps([m.model_dump_json() for m in self.memories]))
+            (user_dir / "memories.json").write_text(
+                json.dumps(
+                    [m.model_dump() for m in self.load_memories(user_dir=user_dir, new_memories=self.memories)],
+                    indent=2,
+                )
+            )
         if self.summary:
             (user_dir / "summary.txt").write_text(self.summary)
         if self.message_history:
             (user_dir / "message_history.json").write_bytes(
-                _messages.ModelMessagesTypeAdapter.dump_json(self.message_history)
+                _messages.ModelMessagesTypeAdapter.dump_json(
+                    self.load_message_history(user_dir=user_dir, new_messages=self.message_history), indent=2
+                )
             )
 
     def __str__(self) -> str:
@@ -207,8 +321,9 @@ class UserSpecificExperience(BaseModel):
 
 
 class AgentMemories(BaseModel):
+    agent_name: str
     user_specific_experience: UserSpecificExperience | None
-    task_specific_experience: TaskSpecificExperience | None
+    agent_experience: AgentExperience | None
 
     @classmethod
     def load(
@@ -220,37 +335,115 @@ class AgentMemories(BaseModel):
     ) -> Self:
         memories_dir = Path(memories_dir)
         agent_dir = memories_dir / f"{agent_name}"
-        tse_path = agent_dir / "task_specific_experience.json"
-        if tse_path.exists():
-            tse = TaskSpecificExperience.model_validate_json(tse_path.read_text())
+        agent_experience_path = agent_dir / "agent_experience.json"
+        if agent_experience_path.exists():
+            agent_experience = AgentExperience.model_validate_json(agent_experience_path.read_text())
         else:
-            tse = None
+            agent_experience = None
         user_specific_experience = UserSpecificExperience.load(
             user_id=user_id, agent_dir=agent_dir, message_count_limit=message_count_limit
         )
-        return cls(user_specific_experience=user_specific_experience, task_specific_experience=tse)
+        return cls(
+            agent_name=agent_name,
+            user_specific_experience=user_specific_experience,
+            agent_experience=agent_experience,
+        )
 
-    def dump(self, agent_name: str, user_id: UUID, memories_dir: Path | str = AGENT_MEMORIES_DIR) -> None:
+    def dump(
+        self, memories_dir: Path | str = AGENT_MEMORIES_DIR, agent_name: str = "", user_id: UUID | None = None
+    ) -> None:
         memories_dir = Path(memories_dir)
-        agent_dir = memories_dir / f"{agent_name}"
+        agent_dir = memories_dir / f"{agent_name or self.agent_name}"
         agent_dir.mkdir(parents=True, exist_ok=True)
         if self.user_specific_experience is not None:
-            self.user_specific_experience.dump(user_id=user_id, agent_dir=agent_dir)
-        if self.task_specific_experience is not None:
-            (agent_dir / "task_specific_experience.json").write_text(
-                self.task_specific_experience.model_dump_json()
-            )
+            self.user_specific_experience.dump(agent_dir=agent_dir, user_id=user_id)
+        if self.agent_experience is not None:
+            (agent_dir / "agent_experience.json").write_text(self.agent_experience.model_dump_json(indent=2))
 
     @property
-    def message_history(self) -> list[_messages.ModelMessage]:
+    def user_id(self) -> UUID | None:
+        if self.user_specific_experience is not None:
+            return self.user_specific_experience.user_id
+        return None
+
+    @property
+    def message_history(self) -> list[_messages.ModelMessage] | None:
         if self.user_specific_experience is not None:
             return self.user_specific_experience.message_history
-        return []
+        return None
 
     def __str__(self) -> str:
         res = ""
         if self.user_specific_experience is not None and str(self.user_specific_experience):
             res += f"<user_specific_experience>\n{self.user_specific_experience}\n</user_specific_experience>\n\n"
-        if self.task_specific_experience is not None and str(self.task_specific_experience):
-            res += f"<task_specific_experience>\n{self.task_specific_experience.model_dump_json()}\n</task_specific_experience>\n\n"
+        if self.agent_experience is not None and str(self.agent_experience):
+            res += f"<agent_experience>\n{self.agent_experience.model_dump_json()}\n</agent_experience>\n\n"
         return res.strip()
+
+
+async def create_user_specific_experience(
+    memory_agent: Agent,
+    agent_memories: AgentMemories | None,
+    message_history: list[_messages.ModelMessage] | None = None,
+    new_messages: list[_messages.ModelMessage] | None = None,
+) -> UserSpecificExperience | None:
+    if not message_history:
+        return None
+    log = f"Creating user specific experience for Agent {memory_agent.name}"
+    if agent_memories and agent_memories.user_specific_experience:
+        log += f" and User {agent_memories.user_specific_experience.user_id}"
+    logger.info(log)
+    profile_res = await memory_agent.run(
+        user_prompt=Profile.user_prompt(), result_type=Profile, message_history=message_history
+    )
+    profile = profile_res.data
+    memories_res = await memory_agent.run(
+        user_prompt=Memory.user_prompt(), result_type=list[Memory], message_history=message_history
+    )
+    memories = memories_res.data
+    summary_res = await memory_agent.run(
+        user_prompt=SUMMARY_PROMPT, result_type=str, message_history=message_history
+    )
+    summary = summary_res.data
+    user_specific_experience = UserSpecificExperience(
+        profile=profile, memories=memories, summary=summary, message_history=new_messages
+    )
+    return user_specific_experience
+
+
+async def create_agent_experience(
+    memory_agent: Agent, message_history: list[_messages.ModelMessage] | None = None
+) -> AgentExperience | None:
+    if not message_history:
+        return None
+    agent_experience_res = await memory_agent.run(
+        user_prompt=AgentExperience.user_prompt(), result_type=AgentExperience, message_history=message_history
+    )
+    return agent_experience_res.data
+
+
+async def memorize(
+    memory_agent: Agent,
+    agent_memories: AgentMemories,
+    message_history: list[_messages.ModelMessage] | None = None,
+    new_messages: list[_messages.ModelMessage] | None = None,
+    memories_dir: Path | str = AGENT_MEMORIES_DIR,
+    agent_name: str = "",
+    user_id: UUID | None = None,
+) -> None:
+    if not message_history:
+        return
+    user_specific_experience = await create_user_specific_experience(
+        memory_agent=memory_agent,
+        agent_memories=agent_memories,
+        message_history=message_history,
+        new_messages=new_messages,
+    )
+    agent_experience = await create_agent_experience(memory_agent=memory_agent, message_history=message_history)
+    agent_memories.user_specific_experience = user_specific_experience
+    agent_memories.agent_experience = agent_experience
+    agent_memories.dump(
+        memories_dir=memories_dir,
+        agent_name=agent_name or agent_memories.agent_name,
+        user_id=user_id or agent_memories.user_id,
+    )
