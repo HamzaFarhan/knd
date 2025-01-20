@@ -10,7 +10,7 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic_ai import Agent
 from pydantic_ai import messages as _messages
 
-from knd.ai import trim_messages
+from knd.ai import MessageCounter, count_messages, trim_messages
 
 AGENT_MEMORIES_DIR = "agent_memories"
 MESSAGE_COUNT_LIMIT = 10
@@ -244,21 +244,28 @@ class UserSpecificExperience(BaseModel):
     @classmethod
     def load_memories(cls, user_dir: Path, new_memories: list[Memory] | None = None) -> list[Memory]:
         user_memories_path = user_dir / "memories.json"
-        memories = {"memories": []}
-        if user_memories_path.exists():
-            memories["memories"] = [Memory.model_validate(m) for m in json.loads(user_memories_path.read_text())]
+        memories = {
+            "memories": [Memory.model_validate(m) for m in json.loads(user_memories_path.read_text())]
+            if user_memories_path.exists()
+            else []
+        }
         memories["memories"].extend(new_memories or [])
         return Memories.model_validate(memories).memories
 
     @classmethod
     def load_message_history(
-        cls, user_dir: Path, new_messages: list[_messages.ModelMessage] | None = None
+        cls,
+        user_dir: Path,
+        new_messages: list[_messages.ModelMessage] | None = None,
+        message_count_limit: int = MESSAGE_COUNT_LIMIT,
     ) -> list[_messages.ModelMessage]:
         message_history_path = user_dir / "message_history.json"
-        message_history = []
-        if message_history_path.exists():
-            message_history = _messages.ModelMessagesTypeAdapter.validate_json(message_history_path.read_bytes())
-        return message_history + (new_messages or [])
+        message_history = (
+            _messages.ModelMessagesTypeAdapter.validate_json(message_history_path.read_bytes())
+            if message_history_path.exists()
+            else []
+        )
+        return trim_messages(messages=message_history + (new_messages or []), count_limit=message_count_limit)
 
     @classmethod
     def load(
@@ -281,8 +288,9 @@ class UserSpecificExperience(BaseModel):
             summary = user_summary_path.read_text()
         else:
             summary = ""
-        message_history = cls.load_message_history(user_dir=user_dir, new_messages=new_messages)
-        message_history = trim_messages(messages=message_history, count_limit=message_count_limit)
+        message_history = cls.load_message_history(
+            user_dir=user_dir, new_messages=new_messages, message_count_limit=message_count_limit
+        )
         if not profile and not memories and not summary and not message_history:
             return None
         return cls(profile=profile, memories=memories, summary=summary, message_history=message_history)
@@ -381,11 +389,29 @@ class AgentMemories(BaseModel):
         return res.strip()
 
 
+async def summarize(
+    memory_agent: Agent,
+    message_history: list[_messages.ModelMessage] | None = None,
+    summarize_prompt: str = SUMMARY_PROMPT,
+    summary_count_limit: int = MESSAGE_COUNT_LIMIT,
+    summary_message_counter: MessageCounter = lambda _: 1,
+) -> str:
+    if not message_history:
+        return ""
+    if count_messages(messages=message_history, message_counter=summary_message_counter) > summary_count_limit:
+        return (
+            await memory_agent.run(user_prompt=summarize_prompt, result_type=str, message_history=message_history)
+        ).data
+    return ""
+
+
 async def create_user_specific_experience(
     memory_agent: Agent,
     agent_memories: AgentMemories | None,
     message_history: list[_messages.ModelMessage] | None = None,
     new_messages: list[_messages.ModelMessage] | None = None,
+    summary_count_limit: int = MESSAGE_COUNT_LIMIT,
+    summary_message_counter: MessageCounter = lambda _: 1,
 ) -> UserSpecificExperience | None:
     if not message_history:
         return None
@@ -401,10 +427,12 @@ async def create_user_specific_experience(
         user_prompt=Memory.user_prompt(), result_type=list[Memory], message_history=message_history
     )
     memories = memories_res.data
-    summary_res = await memory_agent.run(
-        user_prompt=SUMMARY_PROMPT, result_type=str, message_history=message_history
+    summary = await summarize(
+        memory_agent=memory_agent,
+        message_history=message_history,
+        summary_count_limit=summary_count_limit,
+        summary_message_counter=summary_message_counter,
     )
-    summary = summary_res.data
     user_specific_experience = UserSpecificExperience(
         profile=profile, memories=memories, summary=summary, message_history=new_messages
     )

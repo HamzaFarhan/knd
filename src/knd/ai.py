@@ -8,6 +8,8 @@ from pydantic_ai.result import ResultData, RunResult
 from pydantic_ai.tools import AgentDeps
 from rich.prompt import Prompt
 
+MessageCounter = Callable[[_messages.ModelMessage], int]
+
 
 def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponsePart) -> int:
     if isinstance(part, (_messages.UserPromptPart, _messages.SystemPromptPart, _messages.TextPart)):
@@ -25,12 +27,6 @@ def count_message_tokens(message: _messages.ModelMessage) -> int:
     return sum(count_part_tokens(part) for part in message.parts)
 
 
-def count_tokens(messages: list[_messages.ModelMessage] | _messages.ModelMessage) -> int:
-    if isinstance(messages, _messages.ModelMessage):
-        messages = [messages]
-    return sum(count_message_tokens(message=msg) for msg in messages)
-
-
 def replace_system_parts(
     message: _messages.ModelRequest, new_parts: list[_messages.ModelRequestPart] | None = None
 ) -> _messages.ModelRequest | None:
@@ -42,10 +38,18 @@ def replace_system_parts(
     return None
 
 
+def count_messages(
+    messages: list[_messages.ModelMessage] | _messages.ModelMessage, message_counter: MessageCounter = lambda _: 1
+) -> int:
+    if isinstance(messages, _messages.ModelMessage):
+        messages = [messages]
+    return sum(message_counter(msg) for msg in messages)
+
+
 def trim_messages(
     messages: list[_messages.ModelMessage],
-    count_limit: int | None = None,
-    message_counter: Callable[[_messages.ModelMessage], int] = lambda _: 1,
+    count_limit: int | list[int] | None = None,
+    message_counter: MessageCounter | list[MessageCounter] = lambda _: 1,
     remove_system_prompt: bool = False,
     strategy: Literal["last", "first"] = "last",
 ) -> list[_messages.ModelMessage]:
@@ -61,28 +65,43 @@ def trim_messages(
     if count_limit is None:
         n = len(messages)
     else:
-        current_count = 0
+        if not isinstance(count_limit, list):
+            count_limit = [count_limit]
+        if not isinstance(message_counter, list):
+            message_counter = [message_counter]
+        current_counts = [0] * len(count_limit)
         n = 0
         if strategy == "first":
             messages_to_count = messages
         else:
             messages_to_count = messages[::-1]
         for msg in messages_to_count:
-            msg_count = message_counter(msg)
-            if current_count + msg_count > count_limit:
+            # Calculate all counts for this message
+            msg_counts = [counter(msg) for counter in message_counter]
+
+            # Check if adding this message would exceed any limit
+            would_exceed = False
+            for i, (count, limit, msg_count) in enumerate(zip(current_counts, count_limit, msg_counts)):
+                if count + msg_count > limit:
+                    would_exceed = True
+                    break
+
+            if would_exceed:
                 break
-            current_count += msg_count
+
+            # Update all counts
+            for i, msg_count in enumerate(msg_counts):
+                current_counts[i] += msg_count
             n += 1
     if strategy == "first":
         if n == 0 and not remove_system_prompt:
             n = 1
         return messages[:n]
     result = messages[-n:]
-    while result:
-        if (
-            isinstance(result[0], _messages.ModelRequest)
-            and isinstance(result[0].parts[0], (_messages.UserPromptPart, _messages.SystemPromptPart))
-        ) or n >= len(messages):
+    while result and n < len(messages):
+        if isinstance(result[0], _messages.ModelRequest) and isinstance(
+            result[0].parts[0], (_messages.UserPromptPart, _messages.SystemPromptPart)
+        ):
             break
         n += 1
         result = messages[-n:]

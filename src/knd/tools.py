@@ -4,10 +4,10 @@ import multiprocessing
 import re
 import sys
 from io import StringIO
-from typing import Set
+from typing import Callable, Set
 from urllib.parse import urljoin, urlparse
 
-from crawl4ai import AsyncWebCrawler
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,8 @@ async def crawl_url(
     max_links: int = MAX_LINKS,
     same_domain_only: bool = True,
     prefixes: list[str] | None = None,
+    run_config: CrawlerRunConfig | None = None,
+    url_filter: Callable[[str], bool] | None = None,
     echo: bool = False,
 ) -> dict:
     """
@@ -32,6 +34,8 @@ async def crawl_url(
         max_links: Maximum number of links to follow (default: 5)
         same_domain_only: Only follow links within the same domain (default: True)
         prefixes: List of prefixes to follow (default: None). So only links starting with these prefixes will be followed. If same_domain_only is True, it will be automatically added.
+        run_config: A CrawlerRunConfig object that specifies the configuration for the crawler.
+        url_filter: A function that takes a URL and returns a boolean. If the function returns False, the URL will be skipped.
     """
     visited: Set[str] = set()
     results = {}
@@ -48,6 +52,11 @@ async def crawl_url(
         if depth > max_depth or url in visited or len(results) > max_links:
             return
 
+        if depth > 1 and (url_filter and not url_filter(url)):
+            if echo:
+                logger.warning(f"Skipping {url} because it failed url_filter")
+            return
+
         if prefixes and not any(url.startswith(p) for p in prefixes):
             if echo:
                 logger.warning(f"Skipping {url} because it is not in prefixes")
@@ -57,7 +66,7 @@ async def crawl_url(
 
         async with AsyncWebCrawler(verbose=True) as crawler:
             try:
-                result = await crawler.arun(url=url)
+                result = await crawler.arun(url=url, config=run_config)
                 results[url] = result.markdown
 
                 # Extract links from the page
@@ -80,6 +89,8 @@ def crawl_url_sync(
     max_links: int = MAX_LINKS,
     same_domain_only: bool = True,
     prefixes: list[str] | None = None,
+    run_config: CrawlerRunConfig | None = None,
+    url_filter: Callable[[str], bool] | None = None,
 ) -> dict:
     """
     Recursively crawl starting from a URL up to a specified depth.
@@ -90,10 +101,18 @@ def crawl_url_sync(
         max_links: Maximum number of links to follow (default: 5)
         same_domain_only: Only follow links within the same domain (default: True)
         prefixes: List of prefixes to follow (default: None). So only links starting with these prefixes will be followed. If same_domain_only is True, it will be automatically added.
+        run_config: A CrawlerRunConfig object that specifies the configuration for the crawler.
+        url_filter: A function that takes a URL and returns a boolean. If the function returns False, the URL will be skipped.
     """
     return asyncio.run(
         crawl_url(
-            url=url, max_depth=max_depth, max_links=max_links, same_domain_only=same_domain_only, prefixes=prefixes
+            url=url,
+            max_depth=max_depth,
+            max_links=max_links,
+            same_domain_only=same_domain_only,
+            prefixes=prefixes,
+            run_config=run_config,
+            url_filter=url_filter,
         )
     )
 
