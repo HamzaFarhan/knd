@@ -10,3 +10,5 @@ memories/
 .venv
 *.json
 *job*
+resumes
+*.parquet

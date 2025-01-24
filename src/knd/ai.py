@@ -4,8 +4,8 @@ from typing import Any, Callable, Literal
 from pydantic_ai import Agent, RunContext, models
 from pydantic_ai import messages as _messages
 from pydantic_ai import usage as _usage
-from pydantic_ai.result import ResultData, RunResult
-from pydantic_ai.tools import AgentDeps
+from pydantic_ai.result import ResultDataT, RunResult
+from pydantic_ai.tools import AgentDepsT
 from rich.prompt import Prompt
 
 MessageCounter = Callable[[_messages.ModelMessage], int]
@@ -41,7 +41,7 @@ def replace_system_parts(
 def count_messages(
     messages: list[_messages.ModelMessage] | _messages.ModelMessage, message_counter: MessageCounter = lambda _: 1
 ) -> int:
-    if isinstance(messages, _messages.ModelMessage):
+    if not isinstance(messages, list):
         messages = [messages]
     return sum(message_counter(msg) for msg in messages)
 
@@ -159,10 +159,10 @@ async def get_messages_for_agent_tool(
 
 async def run_until_completion(
     user_prompt: str,
-    agent: Agent[AgentDeps, ResultData],
+    agent: Agent[AgentDepsT, ResultDataT],
     message_history: list[_messages.ModelMessage] | None = None,
-    deps: AgentDeps = None,
-) -> RunResult[ResultData]:
+    deps: AgentDepsT = None,
+) -> RunResult[ResultDataT]:
     while True:
         res = await agent.run(user_prompt=user_prompt, deps=deps, message_history=message_history)
         if isinstance(res.data, str):

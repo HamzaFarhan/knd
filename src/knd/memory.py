@@ -194,31 +194,36 @@ class AgentExperience(BaseModel):
     @classmethod
     def user_prompt(cls) -> str:
         return """
-Review this interaction and update the agent's accumulated experience, focusing on:
+Review this interaction and update the agent's accumulated experience, focusing on general patterns and learnings that apply across all users and sessions:
 
 1. Knowledge Evolution:
-   - How does this interaction refine our understanding of the domain?
-   - What new patterns or anti-patterns emerged?
-   - Which existing strategies were reinforced or challenged?
+   - What general domain insights were gained that could benefit all users?
+   - What universal patterns or anti-patterns emerged?
+   - Which strategies proved effective regardless of user context?
 
 2. Pattern Recognition:
-   - Does this case fit known scenarios or represent a new category?
-   - What tool usage patterns proved effective or ineffective?
-   - What decision points were critical to success/failure?
+   - What common scenarios or use cases does this interaction represent?
+   - Which tool usage patterns were universally effective?
+   - What decision-making principles emerged that could apply broadly?
 
 3. Heuristic Development:
-   - What new rules of thumb emerged from this experience?
-   - How should existing heuristics be modified based on this case?
-   - What contextual factors influenced success?
+   - What general rules of thumb can be derived from this experience?
+   - How can existing heuristics be refined to be more universally applicable?
+   - What contextual factors consistently influence success across users?
 
 Integrate this experience with existing knowledge in <agent_experience>:
-- Reinforce successful patterns that repeat
-- Refine or qualify existing heuristics based on new evidence
-- Add new scenarios or edge cases to known patterns
-- Update tool usage patterns with new insights
-- Identify emerging trends in improvement areas
+- Focus on patterns that are likely to repeat across different users
+- Develop heuristics that are user-agnostic
+- Document tool usage patterns that work in general scenarios
+- Identify improvement areas that would benefit all users
 
-Focus on building a robust, evolving knowledge base that improves the agent's effectiveness over time.
+Important:
+- Exclude user-specific details or preferences
+- Focus on technical and procedural knowledge that applies universally
+- Capture general principles rather than specific instances
+- Maintain privacy by avoiding any personally identifiable information
+
+Focus on building a robust, evolving knowledge base that improves the agent's effectiveness for all users over time.
 Remember that this is cumulative experience - don't overwrite existing knowledge, but rather enhance and refine it.
 """.strip()
 
@@ -402,12 +407,14 @@ async def summarize(
         return (
             await memory_agent.run(user_prompt=summarize_prompt, result_type=str, message_history=message_history)
         ).data
+    else:
+        logger.info("Skipping summary because the `message_history` is too short")
     return ""
 
 
 async def create_user_specific_experience(
     memory_agent: Agent,
-    agent_memories: AgentMemories | None,
+    user_id: UUID | None = None,
     message_history: list[_messages.ModelMessage] | None = None,
     new_messages: list[_messages.ModelMessage] | None = None,
     summary_count_limit: int = MESSAGE_COUNT_LIMIT,
@@ -416,8 +423,8 @@ async def create_user_specific_experience(
     if not message_history:
         return None
     log = f"Creating user specific experience for Agent {memory_agent.name}"
-    if agent_memories and agent_memories.user_specific_experience:
-        log += f" and User {agent_memories.user_specific_experience.user_id}"
+    if user_id:
+        log += f" and User {user_id}"
     logger.info(log)
     profile_res = await memory_agent.run(
         user_prompt=Profile.user_prompt(), result_type=Profile, message_history=message_history
@@ -434,7 +441,11 @@ async def create_user_specific_experience(
         summary_message_counter=summary_message_counter,
     )
     user_specific_experience = UserSpecificExperience(
-        profile=profile, memories=memories, summary=summary, message_history=new_messages
+        user_id=user_id or uuid4(),
+        profile=profile,
+        memories=memories,
+        summary=summary,
+        message_history=new_messages,
     )
     return user_specific_experience
 
@@ -461,9 +472,14 @@ async def memorize(
 ) -> None:
     if not message_history:
         return
+    new_messages = (
+        new_messages
+        or message_history[len(agent_memories.message_history) if agent_memories.message_history else 0 :]
+    )
+    user_id = user_id or agent_memories.user_id
     user_specific_experience = await create_user_specific_experience(
         memory_agent=memory_agent,
-        agent_memories=agent_memories,
+        user_id=user_id,
         message_history=message_history,
         new_messages=new_messages,
     )
@@ -471,7 +487,5 @@ async def memorize(
     agent_memories.user_specific_experience = user_specific_experience
     agent_memories.agent_experience = agent_experience
     agent_memories.dump(
-        memories_dir=memories_dir,
-        agent_name=agent_name or agent_memories.agent_name,
-        user_id=user_id or agent_memories.user_id,
+        memories_dir=memories_dir, agent_name=agent_name or agent_memories.agent_name, user_id=user_id
     )
