@@ -12,3 +12,4 @@ memories/
 *job*
 resumes
 *.parquet
+chroma_db

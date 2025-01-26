@@ -11,6 +11,18 @@ from rich.prompt import Prompt
 MessageCounter = Callable[[_messages.ModelMessage], int]
 
 
+def system_message(content: str) -> _messages.ModelRequest:
+    return _messages.ModelRequest(parts=[_messages.SystemPromptPart(content=content)])
+
+
+def user_message(content: str) -> _messages.ModelRequest:
+    return _messages.ModelRequest(parts=[_messages.UserPromptPart(content=content)])
+
+
+def assistant_message(content: str) -> _messages.ModelResponse:
+    return _messages.ModelResponse(parts=[_messages.TextPart(content=content)])
+
+
 def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponsePart) -> int:
     if isinstance(part, (_messages.UserPromptPart, _messages.SystemPromptPart, _messages.TextPart)):
         content = part.content

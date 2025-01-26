@@ -9,11 +9,12 @@ from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
 from pydantic.json_schema import SkipJsonSchema
 from pydantic_ai import Agent
 from pydantic_ai import messages as _messages
+from pydantic_ai.result import ResultDataT
 
-from knd.ai import MessageCounter, count_messages, trim_messages
+from knd.ai import MessageCounter, count_messages
 
-AGENT_MEMORIES_DIR = "agent_memories"
-MESSAGE_COUNT_LIMIT = 10
+MEMORIES_DIR = "agent_memories"
+SUMMARY_COUNT_LIMIT = 10
 
 SUMMARY_PROMPT = """
 Summarize the conversation so far. Make sure to incorporate the existing summary if it exists.
@@ -147,18 +148,15 @@ class Memories(BaseModel):
     @field_validator("memories")
     @classmethod
     def validate_memories(cls, memories: list[Memory]) -> list[Memory]:
-        # Get superseded IDs
+        if not memories:
+            return []
         superseded_ids = set()
         for memory in memories:
             superseded_ids.update(memory.superseded_ids)
-
-        # Create dict to ensure uniqueness by ID
         memory_dict = {}
         for memory in memories:
             if str(memory.id) not in superseded_ids:
                 memory_dict[str(memory.id)] = Memory(**memory.model_dump(exclude={"superseded_ids"}))
-
-        # Return sorted list of unique memories
         return sorted(memory_dict.values(), key=lambda x: x.created_at)
 
 
@@ -230,10 +228,10 @@ Remember that this is cumulative experience - don't overwrite existing knowledge
 
 class UserSpecificExperience(BaseModel):
     user_id: UUID = Field(default_factory=uuid4)
-    profile: Profile | None
+    profile: Profile | None = None
     memories: list[Memory] = Field(default_factory=list)
     summary: str = ""
-    message_history: list[_messages.ModelMessage] | None = None
+    message_history: list[_messages.ModelMessage] = Field(default_factory=list)
 
     @field_serializer("user_id")
     def serialize_user_id(self, v: UUID) -> str:
@@ -247,83 +245,53 @@ class UserSpecificExperience(BaseModel):
         return v
 
     @classmethod
-    def load_memories(cls, user_dir: Path, new_memories: list[Memory] | None = None) -> list[Memory]:
+    def load(cls, user_id: UUID | str, agent_dir: Path | str, include_profile: bool = True) -> Self | None:
+        user_id = UUID(user_id) if isinstance(user_id, str) else user_id
+        user_dir = Path(agent_dir) / f"{user_id}"
+        if not user_dir.exists():
+            return None
+        user_profile_path = user_dir / "profile.json"
         user_memories_path = user_dir / "memories.json"
+        user_summary_path = user_dir / "summary.txt"
+        message_history_path = user_dir / "message_history.json"
+        profile = (
+            Profile.model_validate_json(user_profile_path.read_text())
+            if include_profile and user_profile_path.exists()
+            else None
+        )
         memories = {
             "memories": [Memory.model_validate(m) for m in json.loads(user_memories_path.read_text())]
             if user_memories_path.exists()
             else []
         }
-        memories["memories"].extend(new_memories or [])
-        return Memories.model_validate(memories).memories
-
-    @classmethod
-    def load_message_history(
-        cls,
-        user_dir: Path,
-        new_messages: list[_messages.ModelMessage] | None = None,
-        message_count_limit: int = MESSAGE_COUNT_LIMIT,
-    ) -> list[_messages.ModelMessage]:
-        message_history_path = user_dir / "message_history.json"
+        memories = Memories.model_validate(memories).memories
+        summary = user_summary_path.read_text() if user_summary_path.exists() else ""
         message_history = (
             _messages.ModelMessagesTypeAdapter.validate_json(message_history_path.read_bytes())
             if message_history_path.exists()
             else []
         )
-        return trim_messages(messages=message_history + (new_messages or []), count_limit=message_count_limit)
-
-    @classmethod
-    def load(
-        cls,
-        user_id: UUID,
-        agent_dir: Path,
-        new_memories: list[Memory] | None = None,
-        new_messages: list[_messages.ModelMessage] | None = None,
-        message_count_limit: int = MESSAGE_COUNT_LIMIT,
-    ) -> Self | None:
-        user_dir = agent_dir / f"{user_id}"
-        user_profile_path = user_dir / "profile.json"
-        user_summary_path = user_dir / "summary.txt"
-        if user_profile_path.exists():
-            profile = Profile.model_validate_json(user_profile_path.read_text())
-        else:
-            profile = None
-        memories = cls.load_memories(user_dir=user_dir, new_memories=new_memories)
-        if user_summary_path.exists():
-            summary = user_summary_path.read_text()
-        else:
-            summary = ""
-        message_history = cls.load_message_history(
-            user_dir=user_dir, new_messages=new_messages, message_count_limit=message_count_limit
+        return cls(
+            user_id=user_id, profile=profile, memories=memories, summary=summary, message_history=message_history
         )
-        if not profile and not memories and not summary and not message_history:
-            return None
-        return cls(profile=profile, memories=memories, summary=summary, message_history=message_history)
 
-    def dump(self, agent_dir: Path, user_id: UUID | None = None) -> None:
-        user_dir = agent_dir / f"{user_id or self.user_id}"
+    def dump(self, agent_dir: Path | str, user_id: UUID | str | None = None, include_profile: bool = True) -> None:
+        user_dir = Path(agent_dir) / f"{user_id or self.user_id or uuid4()}"
         user_dir.mkdir(parents=True, exist_ok=True)
-        if self.profile is not None:
+        if include_profile and self.profile:
             (user_dir / "profile.json").write_text(self.profile.model_dump_json(indent=2))
         if self.memories:
-            (user_dir / "memories.json").write_text(
-                json.dumps(
-                    [m.model_dump() for m in self.load_memories(user_dir=user_dir, new_memories=self.memories)],
-                    indent=2,
-                )
-            )
+            (user_dir / "memories.json").write_text(json.dumps([m.model_dump() for m in self.memories], indent=2))
         if self.summary:
             (user_dir / "summary.txt").write_text(self.summary)
         if self.message_history:
             (user_dir / "message_history.json").write_bytes(
-                _messages.ModelMessagesTypeAdapter.dump_json(
-                    self.load_message_history(user_dir=user_dir, new_messages=self.message_history), indent=2
-                )
+                _messages.ModelMessagesTypeAdapter.dump_json(self.message_history, indent=2)
             )
 
     def __str__(self) -> str:
         res = ""
-        if self.profile is not None:
+        if self.profile:
             res += f"<user_profile>\n{self.profile.model_dump_json()}\n</user_profile>\n\n"
         if self.memories:
             mems = "\n".join([m.model_dump_json(exclude={"superseded_ids"}) for m in self.memories])
@@ -342,63 +310,68 @@ class AgentMemories(BaseModel):
     def load(
         cls,
         agent_name: str,
-        user_id: UUID,
-        memories_dir: Path | str = AGENT_MEMORIES_DIR,
-        message_count_limit: int = MESSAGE_COUNT_LIMIT,
+        user_id: UUID | str | None = None,
+        memories_dir: Path | str = MEMORIES_DIR,
+        include_profile: bool = True,
     ) -> Self:
-        memories_dir = Path(memories_dir)
+        memories_dir = Path(memories_dir or MEMORIES_DIR)
         agent_dir = memories_dir / f"{agent_name}"
+        agent_dir.mkdir(parents=True, exist_ok=True)
         agent_experience_path = agent_dir / "agent_experience.json"
         if agent_experience_path.exists():
             agent_experience = AgentExperience.model_validate_json(agent_experience_path.read_text())
         else:
             agent_experience = None
-        user_specific_experience = UserSpecificExperience.load(
-            user_id=user_id, agent_dir=agent_dir, message_count_limit=message_count_limit
-        )
+        if not user_id:
+            user_specific_experience = None
+        else:
+            user_specific_experience = UserSpecificExperience.load(
+                user_id=UUID(user_id) if isinstance(user_id, str) else user_id,
+                agent_dir=agent_dir,
+                include_profile=include_profile,
+            )
         return cls(
             agent_name=agent_name,
             user_specific_experience=user_specific_experience,
             agent_experience=agent_experience,
         )
 
-    def dump(
-        self, memories_dir: Path | str = AGENT_MEMORIES_DIR, agent_name: str = "", user_id: UUID | None = None
-    ) -> None:
-        memories_dir = Path(memories_dir)
-        agent_dir = memories_dir / f"{agent_name or self.agent_name}"
+    def dump(self, agent_dir: Path | str, user_id: UUID | str | None = None, include_profile: bool = True) -> None:
+        agent_dir = Path(agent_dir)
         agent_dir.mkdir(parents=True, exist_ok=True)
-        if self.user_specific_experience is not None:
-            self.user_specific_experience.dump(agent_dir=agent_dir, user_id=user_id)
-        if self.agent_experience is not None:
+        if self.user_specific_experience:
+            self.user_specific_experience.dump(
+                agent_dir=agent_dir, user_id=user_id, include_profile=include_profile
+            )
+        if self.agent_experience:
             (agent_dir / "agent_experience.json").write_text(self.agent_experience.model_dump_json(indent=2))
 
     @property
     def user_id(self) -> UUID | None:
-        if self.user_specific_experience is not None:
+        if self.user_specific_experience:
             return self.user_specific_experience.user_id
         return None
 
     @property
-    def message_history(self) -> list[_messages.ModelMessage] | None:
-        if self.user_specific_experience is not None:
-            return self.user_specific_experience.message_history
-        return None
+    def message_history(self) -> list[_messages.ModelMessage]:
+        if self.user_specific_experience:
+            return self.user_specific_experience.message_history or []
+        return []
 
     def __str__(self) -> str:
         res = ""
-        if self.user_specific_experience is not None and str(self.user_specific_experience):
+        if self.user_specific_experience and str(self.user_specific_experience):
             res += f"<user_specific_experience>\n{self.user_specific_experience}\n</user_specific_experience>\n\n"
-        if self.agent_experience is not None and str(self.agent_experience):
+        if self.agent_experience and str(self.agent_experience):
             res += f"<agent_experience>\n{self.agent_experience.model_dump_json()}\n</agent_experience>\n\n"
         return res.strip()
 
 
 async def summarize(
-    memory_agent: Agent,
+    memory_agent: Agent[None, ResultDataT],
     message_history: list[_messages.ModelMessage] | None = None,
     summarize_prompt: str = SUMMARY_PROMPT,
-    summary_count_limit: int = MESSAGE_COUNT_LIMIT,
+    summary_count_limit: int = SUMMARY_COUNT_LIMIT,
     summary_message_counter: MessageCounter = lambda _: 1,
 ) -> str:
     if not message_history:
@@ -413,45 +386,55 @@ async def summarize(
 
 
 async def create_user_specific_experience(
-    memory_agent: Agent,
-    user_id: UUID | None = None,
+    memory_agent: Agent[None, ResultDataT],
+    user_id: UUID | str | None = None,
+    agent_dir: Path | str = "",
     message_history: list[_messages.ModelMessage] | None = None,
     new_messages: list[_messages.ModelMessage] | None = None,
-    summary_count_limit: int = MESSAGE_COUNT_LIMIT,
+    summary_count_limit: int = SUMMARY_COUNT_LIMIT,
     summary_message_counter: MessageCounter = lambda _: 1,
+    include_profile: bool = True,
 ) -> UserSpecificExperience | None:
     if not message_history:
         return None
-    log = f"Creating user specific experience for Agent {memory_agent.name}"
-    if user_id:
-        log += f" and User {user_id}"
-    logger.info(log)
-    profile_res = await memory_agent.run(
-        user_prompt=Profile.user_prompt(), result_type=Profile, message_history=message_history
-    )
-    profile = profile_res.data
-    memories_res = await memory_agent.run(
-        user_prompt=Memory.user_prompt(), result_type=list[Memory], message_history=message_history
-    )
-    memories = memories_res.data
+    user_id = user_id or uuid4()
+    if isinstance(user_id, str):
+        user_id = UUID(user_id)
+    logger.info(f"Creating user specific experience for User: {user_id}")
+
+    user_specific_experience = UserSpecificExperience(user_id=user_id)
+    if agent_dir:
+        user_specific_experience = (
+            UserSpecificExperience.load(user_id=user_id, agent_dir=agent_dir, include_profile=include_profile)
+            or user_specific_experience
+        )
+
+    if include_profile:
+        profile = (
+            await memory_agent.run(
+                user_prompt=Profile.user_prompt(), result_type=Profile, message_history=message_history
+            )
+        ).data
+        user_specific_experience.profile = profile or user_specific_experience.profile
+    memories = (
+        await memory_agent.run(
+            user_prompt=Memory.user_prompt(), result_type=list[Memory], message_history=message_history
+        )
+    ).data
+    user_specific_experience.memories.extend(memories)
     summary = await summarize(
         memory_agent=memory_agent,
         message_history=message_history,
         summary_count_limit=summary_count_limit,
         summary_message_counter=summary_message_counter,
     )
-    user_specific_experience = UserSpecificExperience(
-        user_id=user_id or uuid4(),
-        profile=profile,
-        memories=memories,
-        summary=summary,
-        message_history=new_messages,
-    )
+    user_specific_experience.summary = summary
+    user_specific_experience.message_history.extend(new_messages or [])
     return user_specific_experience
 
 
 async def create_agent_experience(
-    memory_agent: Agent, message_history: list[_messages.ModelMessage] | None = None
+    memory_agent: Agent[None, ResultDataT], message_history: list[_messages.ModelMessage] | None = None
 ) -> AgentExperience | None:
     if not message_history:
         return None
@@ -462,30 +445,32 @@ async def create_agent_experience(
 
 
 async def memorize(
-    memory_agent: Agent,
+    memory_agent: Agent[None, ResultDataT],
     agent_memories: AgentMemories,
     message_history: list[_messages.ModelMessage] | None = None,
     new_messages: list[_messages.ModelMessage] | None = None,
-    memories_dir: Path | str = AGENT_MEMORIES_DIR,
+    summary_count_limit: int = SUMMARY_COUNT_LIMIT,
+    summary_message_counter: MessageCounter = lambda _: 1,
+    memories_dir: Path | str = MEMORIES_DIR,
     agent_name: str = "",
-    user_id: UUID | None = None,
+    user_id: UUID | str | None = None,
+    include_profile: bool = True,
 ) -> None:
     if not message_history:
         return
-    new_messages = (
-        new_messages
-        or message_history[len(agent_memories.message_history) if agent_memories.message_history else 0 :]
-    )
-    user_id = user_id or agent_memories.user_id
+    agent_dir = Path(memories_dir or MEMORIES_DIR) / f"{agent_name or agent_memories.agent_name}"
+    agent_dir.mkdir(parents=True, exist_ok=True)
     user_specific_experience = await create_user_specific_experience(
         memory_agent=memory_agent,
-        user_id=user_id,
+        user_id=user_id or agent_memories.user_id,
+        agent_dir=agent_dir,
         message_history=message_history,
         new_messages=new_messages,
+        summary_count_limit=summary_count_limit,
+        summary_message_counter=summary_message_counter,
+        include_profile=include_profile,
     )
     agent_experience = await create_agent_experience(memory_agent=memory_agent, message_history=message_history)
     agent_memories.user_specific_experience = user_specific_experience
     agent_memories.agent_experience = agent_experience
-    agent_memories.dump(
-        memories_dir=memories_dir, agent_name=agent_name or agent_memories.agent_name, user_id=user_id
-    )
+    agent_memories.dump(agent_dir=agent_dir, include_profile=include_profile)
