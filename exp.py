@@ -1,26 +1,29 @@
-import asyncio
+import pytest
 
-import logfire
-from loguru import logger
-from pydantic_ai import Agent
+from joke_testing_utils import judge_joke
 
-logfire.configure()
-logger.configure(handlers=[logfire.loguru_handler()])
-
-agent = Agent(model="google-gla:gemini-1.5-flash", name="knd_evals")
-
-
-@agent.result_validator
-def validate_result(result: str) -> str:
-    if "yoo" not in result:
-        logfire.error("Result does not contain 'yoo'", _tags=["yoo_check"])
-    return result
+jokes_dict = {
+    "Why don't scientists trust atoms? Because they make up everything!": True,
+    "What did the grape say when it got stepped on? Nothing, it just let out a little wine!": True,
+    "Why did the scarecrow win an award? Because he was outstanding in his field!": True,
+    "What's brown and sticky? A stick.": False,
+    "What do you call a bear with no teeth? A gummy bear.": False,
+}
 
 
-async def main():
-    res = await agent.run(user_prompt="Hello, how are you?")
-    logger.info(res.all_messages())
+@pytest.mark.parametrize("joke", jokes_dict.keys())
+def test_joke(joke, results_bag):
+    judgement = judge_joke(joke, jokes_dict)
+    results_bag.judgement = judgement
+    assert judgement
+
+
+def test_synthesis(module_results_df):
+    print("\n   `module_results_df` dataframe:\n")
+    print(module_results_df)
+    module_results_df.to_csv("module_results.csv")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    res = pytest.main(["-s", "-v", __file__])
+    print(res)

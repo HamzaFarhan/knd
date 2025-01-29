@@ -22,6 +22,8 @@ dependencies = [
     "pydantic-ai>=0.0.18",
     "pydantic[email]>=2.10.6",
     "pymupdf4llm>=0.0.17",
+    "pytest>=8.3.4",
+    "pytest-harvest>=1.10.5",
     "rich>=13.9.4",
     "sentence-transformers>=3.4.0",
 ]

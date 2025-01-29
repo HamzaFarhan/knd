@@ -1,13 +1,15 @@
 import datetime as dt
 from enum import IntEnum, StrEnum
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import FastAPI
 from loguru import logger
-from pydantic import BaseModel, EmailStr, Field, HttpUrl, field_serializer
+from pydantic import UUID4, BaseModel, EmailStr, Field, HttpUrl, field_serializer
 from pydantic_ai import Agent, RunContext
 
+from knd.ai import user_message
 from knd.memory import AgentMemories
 from knd.memory import memorize as _memorize
 
@@ -127,6 +129,7 @@ class Resume(BaseModel):
 
 app = FastAPI()
 
+dummy_resume = Resume(years_of_experience=10, summary="This is a dummy resume")
 
 ideal_candidate_agent = Agent(
     model="openai:gpt-4o-mini",
@@ -152,10 +155,13 @@ def system_prompt(ctx: RunContext[AgentMemories]) -> str:
     return str(ctx.deps)
 
 
+agents_dict = {IDEAL_CANDIDATE_AGENT_NAME: ideal_candidate_agent, RESUME_AGENT_NAME: resume_agent}
+
+
 class AgentRequest(BaseModel):
     user_prompt: str
-    user_id: UUID | str | None = None
-    memories: AgentMemories | None = None
+    agent_name: Literal["ideal_candidate_agent", "resume_agent"]
+    user_id: UUID4 | str
     memorize: bool = True
     memories_dir: Path | str = MEMORIES_DIR
 
@@ -168,14 +174,11 @@ class AgentRequest(BaseModel):
         return str(v) if v else None
 
 
-dummy_resume = Resume(years_of_experience=10, summary="This is a dummy resume")
-
-
-
-
-async def run_agent(agent: Agent[AgentMemories, Resume], agent_request: AgentRequest) -> Resume:
-    memories = agent_request.memories or AgentMemories.load(
-        agent_name=agent.name or "agent",
+@app.post("/run_agent")
+async def run_agent(agent_request: AgentRequest) -> Resume:
+    agent = agents_dict[agent_request.agent_name]
+    memories = AgentMemories.load(
+        agent_name=agent_request.agent_name or "agent",
         user_id=agent_request.user_id,
         memories_dir=agent_request.memories_dir,
         include_profile=False,
@@ -197,11 +200,18 @@ async def run_agent(agent: Agent[AgentMemories, Resume], agent_request: AgentReq
     return run.data
 
 
-@app.post(f"/{IDEAL_CANDIDATE_AGENT_NAME}")
-async def ideal_candidate_endpoint(agent_request: AgentRequest) -> Resume:
-    return await run_agent(agent=ideal_candidate_agent, agent_request=agent_request)
-
-
-@app.post(f"/{RESUME_AGENT_NAME}")
-async def resume_endpoint(agent_request: AgentRequest) -> Resume:
-    return await run_agent(agent=resume_agent, agent_request=agent_request)
+@app.put("/add_message")
+async def add_user_message(add_message_request: AgentRequest) -> str:
+    memories = AgentMemories.load(
+        agent_name=add_message_request.agent_name,
+        user_id=add_message_request.user_id,
+        memories_dir=add_message_request.memories_dir,
+    )
+    memories.add_message(
+        message=user_message(add_message_request.user_prompt), user_id=add_message_request.user_id
+    )
+    memories.dump(
+        agent_dir=Path(add_message_request.memories_dir).joinpath(add_message_request.agent_name),
+        user_id=add_message_request.user_id,
+    )
+    return "Message added successfully"

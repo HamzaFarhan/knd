@@ -12,4 +12,5 @@ memories/
 *job*
 resumes
 *.parquet
+*.csv
 chroma_db

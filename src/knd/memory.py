@@ -76,12 +76,12 @@ class Memory(BaseModel):
     )
 
     @field_serializer("id")
-    def serialize_id(self, id: UUID4) -> str:
+    def serialize_id(self, id: UUID) -> str:
         return str(id)
 
     @field_validator("id")
     @classmethod
-    def validate_id(cls, v: str | UUID4) -> UUID4:
+    def validate_id(cls, v: str | UUID) -> UUID:
         if isinstance(v, str):
             return UUID(v)
         return v
@@ -227,29 +227,29 @@ Remember that this is cumulative experience - don't overwrite existing knowledge
 
 
 class UserSpecificExperience(BaseModel):
-    user_id: UUID = Field(default_factory=uuid4)
+    user_id: UUID4 | str = Field(default_factory=uuid4)
     profile: Profile | None = None
     memories: list[Memory] = Field(default_factory=list)
     summary: str = ""
     message_history: list[_messages.ModelMessage] = Field(default_factory=list)
 
     @field_serializer("user_id")
-    def serialize_user_id(self, v: UUID) -> str:
+    def serialize_user_id(self, v: UUID | str) -> str:
         return str(v)
 
     @field_validator("user_id")
     @classmethod
-    def validate_user_id(cls, v: str | UUID) -> UUID:
+    def validate_user_id(cls, v: str | UUID) -> UUID | str:
         if isinstance(v, str):
+            if "test" in v.lower():
+                return "agent_tester"
             return UUID(v)
         return v
 
     @classmethod
     def load(cls, user_id: UUID | str, agent_dir: Path | str, include_profile: bool = True) -> Self | None:
-        user_id = UUID(user_id) if isinstance(user_id, str) else user_id
+        user_id = cls.validate_user_id(user_id)
         user_dir = Path(agent_dir) / f"{user_id}"
-        if not user_dir.exists():
-            return None
         user_profile_path = user_dir / "profile.json"
         user_memories_path = user_dir / "memories.json"
         user_summary_path = user_dir / "summary.txt"
@@ -276,7 +276,8 @@ class UserSpecificExperience(BaseModel):
         )
 
     def dump(self, agent_dir: Path | str, user_id: UUID | str | None = None, include_profile: bool = True) -> None:
-        user_dir = Path(agent_dir) / f"{user_id or self.user_id or uuid4()}"
+        user_id = self.validate_user_id(user_id or self.user_id or uuid4())
+        user_dir = Path(agent_dir) / f"{user_id}"
         user_dir.mkdir(parents=True, exist_ok=True)
         if include_profile and self.profile:
             (user_dir / "profile.json").write_text(self.profile.model_dump_json(indent=2))
@@ -326,9 +327,7 @@ class AgentMemories(BaseModel):
             user_specific_experience = None
         else:
             user_specific_experience = UserSpecificExperience.load(
-                user_id=UUID(user_id) if isinstance(user_id, str) else user_id,
-                agent_dir=agent_dir,
-                include_profile=include_profile,
+                user_id=user_id, agent_dir=agent_dir, include_profile=include_profile
             )
         return cls(
             agent_name=agent_name,
@@ -337,7 +336,7 @@ class AgentMemories(BaseModel):
         )
 
     def dump(self, agent_dir: Path | str, user_id: UUID | str | None = None, include_profile: bool = True) -> None:
-        agent_dir = Path(agent_dir)
+        agent_dir = Path(agent_dir or Path(MEMORIES_DIR).joinpath(self.agent_name))
         agent_dir.mkdir(parents=True, exist_ok=True)
         if self.user_specific_experience:
             self.user_specific_experience.dump(
@@ -347,7 +346,7 @@ class AgentMemories(BaseModel):
             (agent_dir / "agent_experience.json").write_text(self.agent_experience.model_dump_json(indent=2))
 
     @property
-    def user_id(self) -> UUID | None:
+    def user_id(self) -> UUID | str | None:
         if self.user_specific_experience:
             return self.user_specific_experience.user_id
         return None
@@ -357,6 +356,14 @@ class AgentMemories(BaseModel):
         if self.user_specific_experience:
             return self.user_specific_experience.message_history or []
         return []
+
+    def add_message(self, message: _messages.ModelMessage, user_id: UUID | str | None = None) -> None:
+        if self.user_specific_experience:
+            self.user_specific_experience.message_history.append(message)
+        elif user_id:
+            self.user_specific_experience = UserSpecificExperience(user_id=user_id, message_history=[message])
+        else:
+            raise ValueError("No existing user_specific_experience and no user_id provided to create a new one")
 
     def __str__(self) -> str:
         res = ""
@@ -398,8 +405,8 @@ async def create_user_specific_experience(
     if not message_history:
         return None
     user_id = user_id or uuid4()
-    if isinstance(user_id, str):
-        user_id = UUID(user_id)
+    # if isinstance(user_id, str):
+    #     user_id = UUID(user_id)
     logger.info(f"Creating user specific experience for User: {user_id}")
 
     user_specific_experience = UserSpecificExperience(user_id=user_id)
