@@ -1,6 +1,6 @@
 [project]
 name = "knd"
-version = "0.1.1"
+version = "0.1.2"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "beanie>=1.29.0",
     "chromadb>=0.6.3",
     "crawl4ai>=0.4.247",
     "fastapi[standard]>=0.115.7",
@@ -17,9 +18,10 @@ dependencies = [
     "logfire>=3.2.0",
     "loguru>=0.7.3",
     "markitdown>=0.0.1a3",
+    "motor>=3.7.0",
     "polars>=1.20.0",
     "pyarrow>=19.0.0",
-    "pydantic-ai>=0.0.18",
+    "pydantic-ai>=0.0.21",
     "pydantic[email]>=2.10.6",
     "pymupdf4llm>=0.0.17",
     "pytest>=8.3.4",
