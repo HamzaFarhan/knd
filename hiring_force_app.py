@@ -15,6 +15,7 @@ from knd.memory import memorize as _memorize
 
 IDEAL_CANDIDATE_AGENT_NAME = "ideal_candidate_agent"
 RESUME_AGENT_NAME = "resume_agent"
+RESUME_MATCH_AGENT_NAME = "resume_match_agent"
 MEMORIES_DIR = Path("memories")
 
 
@@ -127,6 +128,38 @@ class Resume(BaseModel):
     availability_date: dt.date | None = None
 
 
+class ResumeMatch(BaseModel):
+    summary_feedback: str = Field(description="Analysis of how well the candidate's summary matches requirements")
+    experience_feedback: str = Field(description="Analysis of work experience alignment")
+    skills_feedback: str = Field(description="Analysis of skills match and gaps")
+    education_feedback: str | None = Field(None, description="Education match analysis if relevant")
+    certifications_feedback: str | None = Field(None, description="Analysis of certifications if relevant")
+    overall_score: float = Field(ge=1, le=10, description="Overall match score from 1-10")
+    key_strengths: list[str] = Field(default_factory=list, description="Key areas where candidate excels")
+    gaps: list[str] = Field(default_factory=list, description="Key areas where candidate could improve")
+
+
+RESUME_MATCH_PROMPT = """
+You are an expert technical recruiter. Compare a candidate's resume against an ideal candidate profile and provide detailed feedback.
+
+Guidelines:
+1. Analyze each section objectively
+2. Highlight specific matching qualifications
+3. Note any gaps or misalignments
+4. Consider both direct matches and transferable skills
+5. Provide constructive feedback
+6. Be specific about years of experience and skill levels
+7. Consider culture fit indicators
+"""
+
+resume_match_agent = Agent(
+    model="openai:gpt-4o-mini",
+    result_type=ResumeMatch,
+    system_prompt=RESUME_MATCH_PROMPT,
+    name=RESUME_MATCH_AGENT_NAME,
+)
+
+
 app = FastAPI()
 
 dummy_resume = Resume(years_of_experience=10, summary="This is a dummy resume")
@@ -155,14 +188,18 @@ def system_prompt(ctx: RunContext[AgentMemories]) -> str:
     return str(ctx.deps)
 
 
-agents_dict = {IDEAL_CANDIDATE_AGENT_NAME: ideal_candidate_agent, RESUME_AGENT_NAME: resume_agent}
+agents_dict = {
+    IDEAL_CANDIDATE_AGENT_NAME: ideal_candidate_agent,
+    RESUME_AGENT_NAME: resume_agent,
+    RESUME_MATCH_AGENT_NAME: resume_match_agent,
+}
 
 
 class AgentRequest(BaseModel):
     user_prompt: str
-    agent_name: Literal["ideal_candidate_agent", "resume_agent"]
+    agent_name: Literal["ideal_candidate_agent", "resume_agent", "resume_match_agent"]
     user_id: UUID4 | str
-    memorize: bool = True
+    memorize: bool = False
     memories_dir: Path | str = MEMORIES_DIR
 
     @field_serializer("user_id")
@@ -175,7 +212,7 @@ class AgentRequest(BaseModel):
 
 
 @app.post("/run_agent")
-async def run_agent(agent_request: AgentRequest) -> Resume:
+async def run_agent(agent_request: AgentRequest) -> Resume | ResumeMatch:
     agent = agents_dict[agent_request.agent_name]
     memories = AgentMemories.load(
         agent_name=agent_request.agent_name or "agent",

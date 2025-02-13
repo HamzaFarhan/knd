@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Any, Callable, Literal
+from typing import Callable, Literal
 
 from pydantic_ai import Agent, RunContext, models
 from pydantic_ai import messages as _messages
@@ -147,25 +147,6 @@ def remove_last_tool_call(messages: list[_messages.ModelMessage], tool_name: str
                 if not (isinstance(part, _messages.ToolCallPart) and part.tool_name == tool_name)
             ]
             return messages
-    return messages
-
-
-async def get_messages_for_agent_tool(
-    agent: Agent[None, Any],
-    user_prompt: str,
-    ctx: RunContext,
-    model: models.KnownModelName | models.Model | None = None,
-) -> list[_messages.ModelMessage]:
-    messages = deepcopy(ctx.messages)
-    if isinstance(messages[0], _messages.ModelRequest):
-        new_message = replace_system_parts(
-            message=messages[0],
-            new_parts=await agent._sys_parts(
-                run_context=await create_run_context(agent=agent, user_prompt=user_prompt, ctx=ctx, model=model)
-            ),
-        )
-        if new_message is not None:
-            messages[0] = new_message
     return messages
 
 
