@@ -1609,7 +1609,7 @@ wheels = [
 
 [[package]]
 name = "knd"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "beanie" },
@@ -1636,6 +1636,7 @@ dependencies = [
     { name = "rich" },
     { name = "sentence-transformers" },
     { name = "streamlit" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -1664,6 +1665,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.9.4" },
     { name = "sentence-transformers", specifier = ">=3.4.0" },
     { name = "streamlit", specifier = ">=1.42.0" },
+    { name = "tenacity", specifier = ">=9.0.0" },
 ]
 
 [[package]]

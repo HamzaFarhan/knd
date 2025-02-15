@@ -1,13 +1,14 @@
 import datetime as dt
 from enum import IntEnum, StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from loguru import logger
 from pydantic import UUID4, BaseModel, EmailStr, Field, HttpUrl, field_serializer
 from pydantic_ai import Agent, RunContext
+from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
 from knd.ai import user_message
 from knd.memory import AgentMemories
@@ -18,6 +19,10 @@ RESUME_AGENT_NAME = "resume_agent"
 RESUME_MATCH_AGENT_NAME = "resume_match_agent"
 MEMORIES_DIR = Path("memories")
 
+# Add retry configuration
+MAX_RETRIES = 2
+MIN_WAIT_SECONDS = 1
+MAX_WAIT_SECONDS = 3
 
 IDEAL_CANDIDATE_PROMPT = """
 You are a technical recruiter with expertise in creating candidate profiles. Your task is to create an ideal candidate profile in a specific format based on the job description provided.
@@ -26,6 +31,7 @@ Important Guidelines:
 1. Use the job description to fill in all relevant fields
 2. For fields not explicitly mentioned in the job description:
    - Fill in reasonable values if they can be confidently inferred from the context
+   - Example: If the job description does not explicitly mention the title, use the work experience to infer the title
    - Example: If job says "senior position" but no years specified, assume 7+ years
    - Example: If location mentions "hybrid in NYC", include NYC in location field
    - Example: If role is about python web development but does not mention FastAPI, add FastAPI to skills
@@ -112,8 +118,10 @@ class ContactInfo(BaseModel):
 
 
 class Resume(BaseModel):
+    title: str = Field(
+        description="The title of the candidate. Will either be explicitly stated or inferred from the work experience."
+    )
     years_of_experience: float
-
     summary: str = Field(description="Name and other personal information should not be included")
 
     work_experience: list[WorkExperience] = Field(default_factory=list)
@@ -162,7 +170,7 @@ resume_match_agent = Agent(
 
 app = FastAPI()
 
-dummy_resume = Resume(years_of_experience=10, summary="This is a dummy resume")
+dummy_resume = Resume(title="Software Engineer", years_of_experience=10, summary="This is a dummy resume")
 
 ideal_candidate_agent = Agent(
     model="openai:gpt-4o-mini",
@@ -211,6 +219,21 @@ class AgentRequest(BaseModel):
         return str(v) if v else None
 
 
+# Add retry decorator
+@retry(
+    stop=stop_after_attempt(MAX_RETRIES + 1),  # +1 because first attempt counts
+    wait=wait_exponential(multiplier=MIN_WAIT_SECONDS, max=MAX_WAIT_SECONDS),
+    reraise=True,
+)
+async def run_agent_with_retry(
+    agent: Agent[AgentMemories | None, str | Resume | ResumeMatch],
+    user_prompt: str,
+    deps: AgentMemories | None = None,
+    message_history: list | None = None,
+) -> Any:
+    return await agent.run(user_prompt=user_prompt, deps=deps, message_history=message_history)
+
+
 @app.post("/run_agent")
 async def run_agent(agent_request: AgentRequest) -> Resume | ResumeMatch:
     agent = agents_dict[agent_request.agent_name]
@@ -221,9 +244,35 @@ async def run_agent(agent_request: AgentRequest) -> Resume | ResumeMatch:
         include_profile=False,
     )
     logger.info(f"Running agent: {agent.name} with memories: {memories.model_dump_json(indent=2)}")
-    run = await agent.run(
-        user_prompt=agent_request.user_prompt, deps=memories, message_history=memories.message_history
-    )
+
+    try:
+        run = await run_agent_with_retry(
+            agent=agent,
+            user_prompt=agent_request.user_prompt,
+            deps=memories,
+            message_history=memories.message_history,
+        )
+    except RetryError as e:
+        # Check if the underlying error is rate limiting related
+        if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
+            raise HTTPException(
+                status_code=429, detail="We're experiencing high demand. Please try again in a few minutes."
+            )
+        # For other API errors that might be temporary
+        if "api" in str(e).lower() or "connection" in str(e).lower():
+            raise HTTPException(
+                status_code=503, detail="The AI service is temporarily unavailable. Please try again later."
+            )
+        # For input/prompt related errors
+        if "prompt" in str(e).lower() or "input" in str(e).lower():
+            raise HTTPException(
+                status_code=400,
+                detail="There was an issue with the input. Please check your prompt and try again.",
+            )
+        # For any other unexpected errors
+        logger.error(f"Agent run failed after retries: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred. Please try again later.")
+
     if agent_request.memorize:
         await _memorize(
             memory_agent=memory_agent,
