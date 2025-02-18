@@ -1,12 +1,21 @@
 from copy import deepcopy
-from typing import Callable, Literal
+from enum import StrEnum
+from typing import Any, Callable, Literal
 
-from pydantic_ai import Agent, RunContext, models
+from pydantic_ai import Agent
 from pydantic_ai import messages as _messages
-from pydantic_ai import usage as _usage
 from pydantic_ai.result import ResultDataT, RunResult
 from pydantic_ai.tools import AgentDepsT
 from rich.prompt import Prompt
+
+
+class MessageRole(StrEnum):
+    SYSTEM = "system"
+    USER = "user"
+    AI = "ai"
+
+
+MessageContentT = _messages.ModelMessage | dict[str, Any] | str
 
 MessageCounter = Callable[[_messages.ModelMessage], int]
 
@@ -19,8 +28,21 @@ def user_message(content: str) -> _messages.ModelRequest:
     return _messages.ModelRequest(parts=[_messages.UserPromptPart(content=content)])
 
 
-def assistant_message(content: str) -> _messages.ModelResponse:
+def ai_message(content: str) -> _messages.ModelResponse:
     return _messages.ModelResponse(parts=[_messages.TextPart(content=content)])
+
+
+def new_message(content: MessageContentT, role: MessageRole) -> _messages.ModelMessage:
+    if isinstance(content, dict):
+        return _messages.ModelMessagesTypeAdapter.validate_python([content])[0]
+    if isinstance(content, str):
+        if role == MessageRole.SYSTEM:
+            return system_message(content)
+        if role == MessageRole.USER:
+            return user_message(content)
+        if role == MessageRole.AI:
+            return ai_message(content)
+    return content
 
 
 def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponsePart) -> int:
@@ -120,34 +142,6 @@ def trim_messages(
     if n < len(messages) and isinstance(messages[0].parts[0], _messages.SystemPromptPart):
         return [messages[0]] + result
     return result
-
-
-async def create_run_context(
-    agent: Agent,
-    user_prompt: str,
-    ctx: RunContext | None = None,
-    model: models.KnownModelName | models.Model | None = None,
-):
-    deps = agent._get_deps(ctx.deps if (ctx is not None and agent._deps_type is type(ctx.deps)) else None)
-    model_used = await agent._get_model(model)
-    return RunContext(
-        deps=deps, model=model_used, usage=ctx.usage if ctx is not None else _usage.Usage(), prompt=user_prompt
-    )
-
-
-def remove_last_tool_call(messages: list[_messages.ModelMessage], tool_name: str):
-    messages = deepcopy(messages)
-    for msg in messages[::-1]:
-        if isinstance(msg, _messages.ModelResponse) and any(
-            isinstance(part, _messages.ToolCallPart) for part in msg.parts
-        ):
-            msg.parts = [
-                part
-                for part in msg.parts
-                if not (isinstance(part, _messages.ToolCallPart) and part.tool_name == tool_name)
-            ]
-            return messages
-    return messages
 
 
 async def run_until_completion(

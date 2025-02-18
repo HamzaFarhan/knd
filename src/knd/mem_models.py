@@ -9,6 +9,8 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic_ai import messages as _messages
 from pydantic_ai.models import KnownModelName
 
+from knd.ai import MessageContentT, MessageRole, new_message
+
 
 def validate_datetime(v: str | datetime) -> datetime:
     if isinstance(v, str):
@@ -35,6 +37,12 @@ class Profile(BaseModel):
         description="A list of the user's preferred conversation styles, topics they want to avoid, etc.",
     )
 
+    def __str__(self) -> str:
+        res = ""
+        if any(v for v in self.model_dump().values()):
+            res += f"<user_profile>\n{self.model_dump_json()}\n</user_profile>"
+        return res.strip()
+
     @classmethod
     def user_prompt(cls) -> str:
         return "Create an updated detailed user profile from the current information you have. Make sure to incorporate the existing profile if it exists in <user_specific_experience>. Prefer to add new stuff to the profile rather than overwrite existing stuff. Unless of course it makes sense to overwrite existing stuff. For example, if the user says they are 25 years old, and the profile says they are 20 years old, then it makes sense to overwrite the profile with the new information."
@@ -53,6 +61,9 @@ class Memory(BaseModel):
     superseded_ids: list[str] = Field(
         default_factory=list, description="IDs of memories this explicitly supersedes"
     )
+
+    def __str__(self) -> str:
+        return self.model_dump_json(exclude={"superseded_ids"})
 
     @field_validator("id")
     @classmethod
@@ -153,6 +164,13 @@ class AgentExperience(BaseModel):
         default_factory=list,
     )
 
+    def add_to_field(self, field: str, value: str) -> None:
+        field_value = getattr(self, field, None)
+        if field_value is None or not isinstance(field_value, list):
+            return
+        field_value.append(value)
+        setattr(self, field, field_value)
+
     @classmethod
     def user_prompt(cls) -> str:
         return """
@@ -190,10 +208,14 @@ Remember that this is cumulative experience - don't overwrite existing knowledge
 """.strip()
 
 
+class GeneratedUser(BaseModel):
+    profile: Profile | None = None
+    memories: list[Memory] = Field(default_factory=list)
+
+
 class User(Document):
     """User document storing profile and accumulated memories"""
 
-    user_id: Annotated[UUID | str, Indexed(unique=True)] = Field(default_factory=uuid4)
     profile: Profile = Field(default_factory=Profile)
     memories: list[Memory] = Field(default_factory=list)
 
@@ -201,28 +223,21 @@ class User(Document):
         name = "users"
         validate_on_save = True
 
-    @field_validator("user_id")
-    @classmethod
-    def validate_user_id(cls, v: str | UUID) -> UUID | str:
-        if isinstance(v, str):
-            if "test" in v.lower():
-                return "agent_tester"
-            return UUID(v)
-        return v
+    def __str__(self) -> str:
+        res = str(self.profile)
+        if self.memories:
+            mems = "\n".join([str(m) for m in self.memories])
+            res += f"\n\n<memories>\n{mems}\n</memories>\n\n"
+        return res.strip()
 
     @field_validator("memories")
     @classmethod
     def validate_memories(cls, v: list[Memory]) -> list[Memory]:
         return validate_memories(v)
 
-    def __str__(self) -> str:
-        res = ""
-        if self.profile:
-            res += f"<user_profile>\n{self.profile.model_dump_json()}\n</user_profile>\n\n"
-        if self.memories:
-            mems = "\n".join([m.model_dump_json(exclude={"superseded_ids"}) for m in self.memories])
-            res += f"<memories>\n{mems}\n</memories>\n\n"
-        return res.strip()
+    def update_from_generated_user(self, generated_user: GeneratedUser) -> None:
+        self.profile = generated_user.profile or self.profile
+        self.memories.extend(generated_user.memories)
 
 
 class Agent(Document):
@@ -253,8 +268,14 @@ class Task(Document):
 
     class Settings:
         name = "tasks"
-        indexes = ["user.user_id", "agent.name", "status", "created_at"]
+        indexes = ["user._id", "agent.name", "status", "created_at"]
         validate_on_save = True
+
+    def experience_str(self) -> str:
+        return (
+            f"<agent_experience>\n{self.agent.experience.model_dump_json()}\n</agent_experience>\n\n"  # type: ignore
+            f"<user_specific_experience>\n{self.user}\n</user_specific_experience>\n\n"
+        )
 
     @field_validator("message_history")
     @classmethod
@@ -275,39 +296,13 @@ class Task(Document):
     def validate_updated_at(cls, v: str | datetime) -> datetime:
         return validate_datetime(v)
 
+    def add_message(self, content: MessageContentT, role: MessageRole = MessageRole.USER):
+        self.message_history.append(new_message(content=content, role=role))
 
-# async def init_db():
-#     """Initialize database connection"""
-#     client = AsyncIOMotorClient("mongodb://localhost:27017")
-#     await init_beanie(database=client.agent_db, document_models=[User, Agent, Task])
-
-
-# async def create_task(user_id: UUID, agent_name: str) -> Task:
-#     """Create a new task"""
-#     user = await User.find_one(User.user_id == user_id)
-#     agent = await Agent.find_one(Agent.name == agent_name)
-
-#     task = Task(user=user, agent=agent, status=TaskStatus.CREATED)
-#     await task.insert()
-#     return task
-
-
-# async def resume_task(task_id: PydanticObjectId) -> Task:
-#     """Resume a paused task"""
-#     task = await Task.get(task_id)
-#     if task.status != TaskStatus.PAUSED:
-#         raise ValueError("Task is not paused")
-
-#     # Resume processing using task.state
-#     task.status = TaskStatus.RUNNING
-#     await task.save()
-#     return task
-
-
-# async def update_agent_experience(agent: Agent, new_experience: dict):
-#     """Update agent's accumulated experience"""
-#     # Merge new experience with existing
-#     agent.experience.common_scenarios.extend(new_experience.get("scenarios", []))
-#     agent.experience.user_feedback.extend(new_experience.get("feedback", []))
-#     # ... update other fields
-#     await agent.save()
+    def add_feedback_scenario(
+        self, ai_content: MessageContentT, user_feedback: MessageContentT, ai_response: MessageContentT = ""
+    ):
+        self.message_history.append(new_message(content=ai_content, role=MessageRole.AI))
+        self.message_history.append(new_message(content=user_feedback, role=MessageRole.USER))
+        if ai_response:
+            self.message_history.append(new_message(content=ai_response, role=MessageRole.AI))
