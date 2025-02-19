@@ -226,7 +226,7 @@ class User(Document):
     def __str__(self) -> str:
         res = str(self.profile)
         if self.memories:
-            mems = "\n".join([str(m) for m in self.memories])
+            mems = "\n\n".join([str(m) for m in self.memories])
             res += f"\n\n<memories>\n{mems}\n</memories>\n\n"
         return res.strip()
 
