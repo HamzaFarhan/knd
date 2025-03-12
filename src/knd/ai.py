@@ -4,7 +4,8 @@ from typing import Any, Callable, Literal
 
 from pydantic_ai import Agent
 from pydantic_ai import messages as _messages
-from pydantic_ai.result import ResultDataT, RunResult
+from pydantic_ai.agent import AgentRunResult
+from pydantic_ai.result import ResultDataT
 from pydantic_ai.tools import AgentDepsT
 from rich.prompt import Prompt
 
@@ -45,7 +46,7 @@ def new_message(content: MessageContentT, role: MessageRole) -> _messages.ModelM
     return content
 
 
-def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponsePart) -> int:
+def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponsePart) -> int | None:
     if isinstance(part, (_messages.UserPromptPart, _messages.SystemPromptPart, _messages.TextPart)):
         content = part.content
     elif isinstance(part, _messages.ToolReturnPart):
@@ -54,11 +55,13 @@ def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponse
         content = part.model_response()
     elif isinstance(part, _messages.ToolCallPart):
         content = part.args_as_json_str()
+    if not isinstance(content, str):
+        return None
     return int(len(content.split()) / 0.75)
 
 
 def count_message_tokens(message: _messages.ModelMessage) -> int:
-    return sum(count_part_tokens(part) for part in message.parts)
+    return sum(count_part_tokens(part) or 0 for part in message.parts)
 
 
 def replace_system_parts(
@@ -149,7 +152,7 @@ async def run_until_completion(
     agent: Agent[AgentDepsT, ResultDataT],
     message_history: list[_messages.ModelMessage] | None = None,
     deps: AgentDepsT = None,
-) -> RunResult[ResultDataT]:
+) -> AgentRunResult[ResultDataT]:
     while True:
         res = await agent.run(user_prompt=user_prompt, deps=deps, message_history=message_history)
         if isinstance(res.data, str):

@@ -142,9 +142,9 @@ class ResumeMatch(BaseModel):
     skills_feedback: str = Field(description="Analysis of skills match and gaps")
     education_feedback: str | None = Field(None, description="Education match analysis if relevant")
     certifications_feedback: str | None = Field(None, description="Analysis of certifications if relevant")
-    overall_score: float = Field(ge=1, le=10, description="Overall match score from 1-10")
     key_strengths: list[str] = Field(default_factory=list, description="Key areas where candidate excels")
     gaps: list[str] = Field(default_factory=list, description="Key areas where candidate could improve")
+    overall_score: float = Field(ge=1, le=10, description="Overall match score from 1-10")
 
 
 RESUME_MATCH_PROMPT = """

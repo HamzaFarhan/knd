@@ -21,7 +21,7 @@ chromadb.api.client.SharedSystemClient.clear_system_cache()  # type:ignore
 
 
 torch.classes.__path__ = []
-
+TITLE = "Intelligent Hiring With Agents"
 MEMORIZE = False
 
 PARENT_DIR = Path("hiring_force")
@@ -74,7 +74,7 @@ def project_creation_ui(label: str) -> None:
 
 
 def main():
-    st.title("Hiring Force")
+    st.title(TITLE)
 
     # Project Selection Section
     st.header("Project Selection")
@@ -252,13 +252,27 @@ def main():
             for cert in resume.certifications:
                 st.markdown(f"- {cert}")
 
-    async def get_resume_match(candidate_resume: Resume, ideal_candidate: Resume) -> ResumeMatch:
+    async def get_resume_match(
+        candidate_resume: Resume, ideal_candidate: Resume, custom_analyses: dict[str, str] | None = None
+    ) -> ResumeMatch:
+        # Create the base prompt
+        base_prompt = f"Compare this candidate:\n{candidate_resume.model_dump_json()}\n\nTo this ideal profile:\n{ideal_candidate.model_dump_json()}"
+
+        # Add custom analyses if provided
+        if custom_analyses and len(custom_analyses) > 0:
+            analysis_prompt = "\n<additional_analyses>\n"
+            for field, description in custom_analyses.items():
+                analysis_prompt += f"- {field}: {description}\n"
+            analysis_prompt += "</additional_analyses>\n"
+            base_prompt += analysis_prompt
+
         agent_request = AgentRequest(
-            user_prompt=f"Compare this candidate:\n{candidate_resume.model_dump_json()}\n\nTo this ideal profile:\n{ideal_candidate.model_dump_json()}",
+            user_prompt=base_prompt,
             agent_name="resume_match_agent",
             user_id=st.session_state.user_id,
             memorize=False,
         )
+
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post("http://localhost:8000/run_agent", json=agent_request.model_dump())
             response.raise_for_status()
@@ -347,7 +361,38 @@ def main():
 
     # Section 4: Find Matches
     st.header("4. Find Matches")
+
+    # Initialize custom analysis text in session state if not present
+    if "custom_analysis_text" not in st.session_state:
+        st.session_state.custom_analysis_text = ""
+
+    # Add custom analysis input
+    st.subheader("Custom Analysis Fields (Optional)")
+    st.write("Enter any additional analyses you'd like to perform on candidates. Format: 'Field: Description'")
+    custom_analysis_text = st.text_area(
+        "One analysis request per line (e.g., 'Leadership Potential: Assess the candidate's leadership capabilities')",
+        value=st.session_state.custom_analysis_text,
+        height=100,
+        key="custom_analysis_input",
+    )
+
+    # # Update session state when text changes
+    # if custom_analysis_text != st.session_state.custom_analysis_text:
+    #     st.session_state.custom_analysis_text = custom_analysis_text
+
+    # # Parse custom analysis requests
+    # custom_analyses = {}
+    # if custom_analysis_text:
+    #     for i, line in enumerate(custom_analysis_text.strip().split("\n")):
+    #         field = f"custom_analysis_{i + 1}"
+    #         description = line.strip()
+    #         if ":" in line:
+    #             field, description = line.split(":", 1)
+    #         custom_analyses[field.strip()] = description.strip()
+
     if st.button("Find Best Matches"):
+        # Make sure to save the text again when the button is clicked
+        st.session_state.custom_analysis_text = custom_analysis_text
         collection = get_collection()
         if not collection:
             st.error("Could not access the resume collection")
@@ -374,45 +419,38 @@ def main():
                         seen_ids.add(id_)
                         resume = Resume.model_validate_json((RESUME_OBJECTS_DIR / id_).read_text())
                         match_analysis = asyncio.run(get_resume_match(resume, ideal_candidate))
-
+                        # logger.info(f"Match analysis: {match_analysis.model_dump_json(indent=4)}")
                         # Normalize the ChromaDB distance to a 1-10 score
                         semantic_score = normalize_chroma_distance(distance)
 
                         # Combine scores (70% semantic, 30% analysis)
                         combined_score = 0.7 * semantic_score + 0.3 * match_analysis.overall_score
 
-                        matches.append(
-                            {
-                                "Name": Path(id_).stem,
-                                "Overall Score": min(10.0, combined_score + 1.5),
-                                "Semantic Score": min(10.0, semantic_score + 1.5),
-                                "AI Analysis Score": min(10.0, match_analysis.overall_score + 1.5),
-                                "Years of Experience": resume.years_of_experience,
-                                "Title": resume.title,
-                                "Key Strengths": "\n".join(f"• {s}" for s in match_analysis.key_strengths),
-                                "Areas for Growth": "\n".join(f"• {g}" for g in match_analysis.gaps),
-                                "Skills Analysis": match_analysis.skills_feedback,
-                                "Experience Analysis": match_analysis.experience_feedback,
-                            }
-                        )
+                        # Create the base match dictionary
+                        match_dict = {
+                            "Name": Path(id_).stem,
+                            "Overall Score": min(10.0, combined_score + 1.5),
+                            "Semantic Score": min(10.0, semantic_score + 1.5),
+                            "AI Analysis Score": min(10.0, match_analysis.overall_score + 1.5),
+                            "Years of Experience": resume.years_of_experience,
+                            "Title": resume.title,
+                            "Key Strengths": "\n".join(f"• {s}" for s in match_analysis.key_strengths),
+                            "Areas for Growth": "\n".join(f"• {g}" for g in match_analysis.gaps),
+                            "Skills Analysis": match_analysis.skills_feedback,
+                            "Experience Analysis": match_analysis.experience_feedback,
+                        }
+
+                        # # Add custom analyses to match dictionary
+                        # if match_analysis.additional_analyses:
+                        #     for field, analysis in match_analysis.additional_analyses.items():
+                        #         match_dict[field.replace("_", " ").title()] = analysis
+
+                        matches.append(match_dict)
 
             if matches:
                 df = pd.DataFrame(matches)
-                # Sort by Match Score in descending order
-                df = df.sort_values("Overall Score", ascending=False)
-                st.dataframe(
-                    df,
-                    column_config={
-                        "Overall Score": st.column_config.NumberColumn(format="%.1f"),
-                        "Semantic Score": st.column_config.NumberColumn(format="%.1f"),
-                        "AI Analysis Score": st.column_config.NumberColumn(format="%.1f"),
-                        "Key Strengths": st.column_config.TextColumn(width="medium"),
-                        "Areas for Growth": st.column_config.TextColumn(width="medium"),
-                        "Skills Analysis": st.column_config.TextColumn(width="large"),
-                        "Experience Analysis": st.column_config.TextColumn(width="large"),
-                    },
-                    hide_index=True,
-                )
+
+                st.dataframe(df.sort_values("Overall Score", ascending=False), hide_index=True)
             else:
                 st.warning("No matches found")
 

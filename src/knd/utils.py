@@ -1,11 +1,11 @@
 import inspect
 import re
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import wraps
 from itertools import chain
 from pathlib import Path
-from typing import Any, Iterable, TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 

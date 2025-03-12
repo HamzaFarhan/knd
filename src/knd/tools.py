@@ -1,13 +1,9 @@
-import asyncio
 import functools
 import multiprocessing
 import re
 import sys
 from io import StringIO
-from typing import Callable, Set
-from urllib.parse import urljoin, urlparse
 
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -15,109 +11,7 @@ MAX_DEPTH = 2
 MAX_LINKS = 5
 
 
-async def crawl_url(
-    url: str,
-    max_depth: int = MAX_DEPTH,
-    max_links: int = MAX_LINKS,
-    same_domain_only: bool = True,
-    prefixes: list[str] | None = None,
-    run_config: CrawlerRunConfig | None = None,
-    url_filter: Callable[[str], bool] | None = None,
-    echo: bool = False,
-) -> dict:
-    """
-    Recursively crawl starting from a URL up to a specified depth.
-
-    Args:
-        url: The URL to start crawling from
-        max_depth: Maximum depth of recursion (default: 2)
-        max_links: Maximum number of links to follow (default: 5)
-        same_domain_only: Only follow links within the same domain (default: True)
-        prefixes: List of prefixes to follow (default: None). So only links starting with these prefixes will be followed. If same_domain_only is True, it will be automatically added.
-        run_config: A CrawlerRunConfig object that specifies the configuration for the crawler.
-        url_filter: A function that takes a URL and returns a boolean. If the function returns False, the URL will be skipped.
-    """
-    visited: Set[str] = set()
-    results = {}
-    start_domain = urlparse(url).netloc
-    prefixes = prefixes or []
-    if same_domain_only:
-        prefixes = [p for p in prefixes + [start_domain] if urlparse(p).netloc == start_domain]
-    if echo:
-        logger.info(f"Crawling {url} with prefixes {prefixes}")
-
-    async def _crawl_url(url: str, depth: int):
-        if echo:
-            logger.info(f"Crawling {url} at depth {depth} with netloc {urlparse(url).netloc}")
-        if depth > max_depth or url in visited or len(results) > max_links:
-            return
-
-        if depth > 1 and (url_filter and not url_filter(url)):
-            if echo:
-                logger.warning(f"Skipping {url} because it failed url_filter")
-            return
-
-        if prefixes and not any(url.startswith(p) for p in prefixes):
-            if echo:
-                logger.warning(f"Skipping {url} because it is not in prefixes")
-            return
-
-        visited.add(url)
-
-        async with AsyncWebCrawler(verbose=True) as crawler:
-            try:
-                result = await crawler.arun(url=url, config=run_config)
-                results[url] = result.markdown
-
-                # Extract links from the page
-                if result.links and depth < max_depth:
-                    for _, links in result.links.items():
-                        for link in links:
-                            if "href" in link:
-                                next_url = urljoin(url, link["href"])
-                                await _crawl_url(url=next_url, depth=depth + 1)
-            except Exception:
-                logger.exception(f"Error crawling {url}")
-
-    await _crawl_url(url, 1)
-    return results
-
-
-def crawl_url_sync(
-    url: str,
-    max_depth: int = MAX_DEPTH,
-    max_links: int = MAX_LINKS,
-    same_domain_only: bool = True,
-    prefixes: list[str] | None = None,
-    run_config: CrawlerRunConfig | None = None,
-    url_filter: Callable[[str], bool] | None = None,
-) -> dict:
-    """
-    Recursively crawl starting from a URL up to a specified depth.
-
-    Args:
-        url: The URL to start crawling from
-        max_depth: Maximum depth of recursion (default: 2)
-        max_links: Maximum number of links to follow (default: 5)
-        same_domain_only: Only follow links within the same domain (default: True)
-        prefixes: List of prefixes to follow (default: None). So only links starting with these prefixes will be followed. If same_domain_only is True, it will be automatically added.
-        run_config: A CrawlerRunConfig object that specifies the configuration for the crawler.
-        url_filter: A function that takes a URL and returns a boolean. If the function returns False, the URL will be skipped.
-    """
-    return asyncio.run(
-        crawl_url(
-            url=url,
-            max_depth=max_depth,
-            max_links=max_links,
-            same_domain_only=same_domain_only,
-            prefixes=prefixes,
-            run_config=run_config,
-            url_filter=url_filter,
-        )
-    )
-
-
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def warn_once() -> None:
     """Warn once about the dangers of PythonREPL."""
     logger.warning("Python REPL can execute arbitrary code. Use with caution.")
