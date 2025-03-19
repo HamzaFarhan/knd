@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from copy import deepcopy
 from enum import StrEnum
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from pydantic_ai import Agent
 from pydantic_ai import messages as _messages
@@ -53,7 +54,7 @@ def count_part_tokens(part: _messages.ModelRequestPart | _messages.ModelResponse
         content = part.model_response_str()
     elif isinstance(part, _messages.RetryPromptPart):
         content = part.model_response()
-    elif isinstance(part, _messages.ToolCallPart):
+    else:
         content = part.args_as_json_str()
     if not isinstance(content, str):
         return None
