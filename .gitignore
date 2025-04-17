@@ -14,3 +14,6 @@ resumes
 *.parquet
 *.csv
 chroma_db
+mcp_runner.py
+mcp_runner.ipynb
+.env

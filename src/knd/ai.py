@@ -3,12 +3,7 @@ from copy import deepcopy
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic_ai import Agent
 from pydantic_ai import messages as _messages
-from pydantic_ai.agent import AgentRunResult
-from pydantic_ai.result import ResultDataT
-from pydantic_ai.tools import AgentDepsT
-from rich.prompt import Prompt
 
 
 class MessageRole(StrEnum):
@@ -146,18 +141,3 @@ def trim_messages(
     if n < len(messages) and isinstance(messages[0].parts[0], _messages.SystemPromptPart):
         return [messages[0]] + result
     return result
-
-
-async def run_until_completion(
-    user_prompt: str,
-    agent: Agent[AgentDepsT, ResultDataT],
-    message_history: list[_messages.ModelMessage] | None = None,
-    deps: AgentDepsT = None,
-) -> AgentRunResult[ResultDataT]:
-    while True:
-        res = await agent.run(user_prompt=user_prompt, deps=deps, message_history=message_history)
-        if isinstance(res.data, str):
-            user_prompt = Prompt.ask(res.data)
-            message_history = res.all_messages()
-        else:
-            return res

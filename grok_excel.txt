@@ -1,0 +1,6 @@
+Vendor Name	Website	Email	Phone	Address
+Bauer Systems Group	https://www.bauersystems.com	info@bauersystems.com (assumed)	Please contact via website	3345 North Service Rd Unit 106, Burlington, ON L7N 3G2, Canada
+CyberX Wholesale	https://www.cyberxwh.com	contact@cyberxwh.com	(647) 909-0656	North Service Rd W, Oakville, ON L6M, Canada
+Infotech Computers	https://www.infotechcomputers.ca	info@infotechcomputers.ca	Sales: 416-256-4948, Service: 416-256-4365	2830 Dufferin Street, Toronto, ON M6B 3S3, Canada
+ADV Computers	https://advancedcompu.com	info@advancedcompu.com	+1-(647)-832-4215	Toronto, ON, Canada (approximate)
+CompuPoint	https://compupoint.ca	info@compupoint.ca	416-754-4812	21 Progress Ave, Scarborough, ON M1P 2V5, Canada
